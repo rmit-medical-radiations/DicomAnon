@@ -166,6 +166,7 @@ class DicomAnonWidget(QWidget):
         self.vbox.addLayout(anon_hbox)
         self.vbox.addWidget(self.pbar)
         self.vbox.addWidget(self.status_label)
+        self.vbox.addStretch()
         self.setLayout(self.vbox)
         self.show()
         self.activateWindow()
