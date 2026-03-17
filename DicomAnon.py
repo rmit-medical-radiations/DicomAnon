@@ -1,7 +1,7 @@
 import sys
 import glob
 import os
-from PyQt6.QtWidgets import QWidget, QPushButton, QProgressBar, QVBoxLayout, QHBoxLayout, QApplication, QFileDialog, QLabel, QMessageBox
+from PyQt6.QtWidgets import QWidget, QPushButton, QProgressBar, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QApplication, QFileDialog, QLabel, QLineEdit, QMessageBox, QSizePolicy
 from PyQt6.QtCore import Qt
 from pydicom import dcmread
 import pandas as pd
@@ -15,12 +15,14 @@ from pydicom.multival import MultiValue
 StyleSheet = '''
 #BlueProgressBar {
     background-color: #E0E0E0;
+    border: 1px solid #BDBDBD;
+    border-radius: 4px;
     text-align: center;
+    height: 18px;
 }
 #BlueProgressBar::chunk {
     background-color: #2196F3;
-    width: 10px; 
-    margin: 0.5px;
+    border-radius: 3px;
 }
 '''
 
@@ -96,62 +98,72 @@ class DicomAnonWidget(QWidget):
         self.destination_dir = ""
         self.lookup_file = ""
 
-        self.source_button = QPushButton('Source Folder')
-        self.source_button.setMaximumWidth(150)
+        BROWSE_WIDTH = 100
+
+        # --- input group ---
+        self.source_button = QPushButton('Browse…')
+        self.source_button.setFixedWidth(BROWSE_WIDTH)
         self.source_button.clicked.connect(self.source_button_clicked)
+        self.source_field = QLineEdit()
+        self.source_field.setReadOnly(True)
+        self.source_field.setPlaceholderText('No folder selected')
 
-        self.source_label = QLabel('<< none >>')
-        self.source_label.setAlignment(Qt.AlignmentFlag.AlignTop)
-
-        self.destination_button = QPushButton('Destination Folder')
-        self.destination_button.setMaximumWidth(150)
+        self.destination_button = QPushButton('Browse…')
+        self.destination_button.setFixedWidth(BROWSE_WIDTH)
         self.destination_button.clicked.connect(self.destination_button_clicked)
+        self.destination_field = QLineEdit()
+        self.destination_field.setReadOnly(True)
+        self.destination_field.setPlaceholderText('No folder selected')
 
-        self.destination_label = QLabel('<< none >>')
-        self.destination_label.setAlignment(Qt.AlignmentFlag.AlignTop)
-
-        self.lookup_button = QPushButton('ID Lookup File')
-        self.lookup_button.setMaximumWidth(150)
+        self.lookup_button = QPushButton('Browse…')
+        self.lookup_button.setFixedWidth(BROWSE_WIDTH)
         self.lookup_button.clicked.connect(self.lookup_button_clicked)
+        self.lookup_field = QLineEdit()
+        self.lookup_field.setReadOnly(True)
+        self.lookup_field.setPlaceholderText('No file selected')
 
-        self.lookup_label = QLabel('<< none >>')
-        self.lookup_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        grid = QGridLayout()
+        grid.setColumnStretch(1, 1)
+        grid.setVerticalSpacing(8)
+        grid.addWidget(QLabel('Source folder'),   0, 0)
+        grid.addWidget(self.source_field,         0, 1)
+        grid.addWidget(self.source_button,        0, 2)
+        grid.addWidget(QLabel('Output folder'),   1, 0)
+        grid.addWidget(self.destination_field,    1, 1)
+        grid.addWidget(self.destination_button,   1, 2)
+        grid.addWidget(QLabel('ID lookup file'),  2, 0)
+        grid.addWidget(self.lookup_field,         2, 1)
+        grid.addWidget(self.lookup_button,        2, 2)
 
+        group = QGroupBox('Folders && Files')
+        group.setLayout(grid)
+
+        # --- anonymise button ---
         self.anon_button = QPushButton('Anonymise!')
+        self.anon_button.setFixedWidth(160)
         self.anon_button.clicked.connect(self.anon_button_clicked)
 
-        # progress bar
-        self.pbar = QProgressBar(self, minimum=0, maximum=100, textVisible=False, objectName="BlueProgressBar")
+        anon_hbox = QHBoxLayout()
+        anon_hbox.addStretch()
+        anon_hbox.addWidget(self.anon_button)
+        anon_hbox.addStretch()
+
+        # --- progress bar ---
+        self.pbar = QProgressBar(self, minimum=0, maximum=100, textVisible=True, objectName="BlueProgressBar")
         self.pbar.setValue(0)
         self.pbar.setVisible(True)
 
-        # source folder
-        self.source_hbox = QHBoxLayout()
-        self.source_hbox.addWidget(self.source_button)
-        self.source_hbox.addWidget(self.source_label)
-
-        # destination folder
-        self.destination_hbox = QHBoxLayout()
-        self.destination_hbox.addWidget(self.destination_button)
-        self.destination_hbox.addWidget(self.destination_label)
-
-        # lookup file
-        self.lookup_hbox = QHBoxLayout()
-        self.lookup_hbox.addWidget(self.lookup_button)
-        self.lookup_hbox.addWidget(self.lookup_label)
-
-        # status bar
+        # --- status label ---
         self.status_label = QLabel('')
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        self.setFixedWidth(600)
+        # --- main layout ---
+        self.setMinimumWidth(640)
         self.vbox = QVBoxLayout()
-        self.vbox.setSpacing(5)
-        self.vbox.addLayout(self.source_hbox)
-        self.vbox.addLayout(self.destination_hbox)
-        self.vbox.addLayout(self.lookup_hbox)
-        self.vbox.addWidget(self.anon_button)
-        self.vbox.setSpacing(10)
+        self.vbox.setSpacing(12)
+        self.vbox.setContentsMargins(16, 16, 16, 16)
+        self.vbox.addWidget(group)
+        self.vbox.addLayout(anon_hbox)
         self.vbox.addWidget(self.pbar)
         self.vbox.addWidget(self.status_label)
         self.setLayout(self.vbox)
@@ -484,7 +496,7 @@ class DicomAnonWidget(QWidget):
 
         self.source_dir = str(QFileDialog.getExistingDirectory(self, "Select Directory"))
         if self.source_dir != "":
-            self.source_label.setText(self.source_dir)
+            self.source_field.setText(self.source_dir)
 
     def destination_button_clicked(self):
         # update the progress bar
@@ -494,7 +506,7 @@ class DicomAnonWidget(QWidget):
 
         self.destination_dir = str(QFileDialog.getExistingDirectory(self, "Select Directory"))
         if self.destination_dir != "":
-            self.destination_label.setText(self.destination_dir)
+            self.destination_field.setText(self.destination_dir)
 
     def lookup_button_clicked(self):
         # update the progress bar
@@ -505,7 +517,7 @@ class DicomAnonWidget(QWidget):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select ID Lookup File", "", "Excel Files (*.xlsx *.xls)")
         if file_path:
             self.lookup_file = file_path
-            self.lookup_label.setText(file_path)
+            self.lookup_field.setText(file_path)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
