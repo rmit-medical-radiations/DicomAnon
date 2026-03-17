@@ -94,6 +94,7 @@ class DicomAnonWidget(QWidget):
 
         self.source_dir = ""
         self.destination_dir = ""
+        self.lookup_file = ""
 
         self.source_button = QPushButton('Source Folder')
         self.source_button.setMaximumWidth(150)
@@ -108,6 +109,13 @@ class DicomAnonWidget(QWidget):
 
         self.destination_label = QLabel('<< none >>')
         self.destination_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        self.lookup_button = QPushButton('ID Lookup File')
+        self.lookup_button.setMaximumWidth(150)
+        self.lookup_button.clicked.connect(self.lookup_button_clicked)
+
+        self.lookup_label = QLabel('<< none >>')
+        self.lookup_label.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self.anon_button = QPushButton('Anonymise!')
         self.anon_button.clicked.connect(self.anon_button_clicked)
@@ -127,6 +135,11 @@ class DicomAnonWidget(QWidget):
         self.destination_hbox.addWidget(self.destination_button)
         self.destination_hbox.addWidget(self.destination_label)
 
+        # lookup file
+        self.lookup_hbox = QHBoxLayout()
+        self.lookup_hbox.addWidget(self.lookup_button)
+        self.lookup_hbox.addWidget(self.lookup_label)
+
         # status bar
         self.status_label = QLabel('')
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -136,6 +149,7 @@ class DicomAnonWidget(QWidget):
         self.vbox.setSpacing(5)
         self.vbox.addLayout(self.source_hbox)
         self.vbox.addLayout(self.destination_hbox)
+        self.vbox.addLayout(self.lookup_hbox)
         self.vbox.addWidget(self.anon_button)
         self.vbox.setSpacing(10)
         self.vbox.addWidget(self.pbar)
@@ -274,25 +288,17 @@ class DicomAnonWidget(QWidget):
 
         return ds
 
-    # look at the mapping file and determine the next ID to use
-    def get_anon_patient_id(self, patient_id, mapping_df):
-        new_patient = False
+    def _load_lookup(self, lookup_file):
+        """Load the ID lookup Excel file. Returns a dict {internal_id_str: anon_id_str}."""
+        df = pd.read_excel(lookup_file)
+        col_internal = df.columns[0]
+        col_anon = df.columns[1]
+        return dict(zip(df[col_internal].astype(str), df[col_anon].astype(str)))
+
+    def _is_new_patient(self, patient_id, mapping_df):
         if mapping_df is None:
-            print('no previous mapping - starting')
-            anon_patient_id = 1
-            new_patient = True
-        else:
-            # have we seen this patient ID before?
-            row_df = mapping_df[mapping_df.patient_id == patient_id]
-            if len(row_df) > 0:
-                anon_patient_id = row_df.iloc[0].anon_patient_id
-                new_patient = False
-                print('patient ID {} seen previously (anon ID {}) - appending to existing directory'.format(patient_id, anon_patient_id))
-            else:
-                anon_patient_id = mapping_df.anon_patient_id.max()+1
-                new_patient = True
-                print('patient ID {} not seen previously - adding new anon ID {} directory'.format(patient_id, anon_patient_id))
-        return new_patient, anon_patient_id
+            return True
+        return len(mapping_df[mapping_df.patient_id == patient_id]) == 0
 
     def _parse_patient_id(self, patient_dir):
         parts = patient_dir.split('_')
@@ -313,7 +319,7 @@ class DicomAnonWidget(QWidget):
         msg.exec()
 
     # process all DICOMs under the selected top-level folder containing patient folders
-    def process_folder(self, source_base_dir, destination_base_dir, mapping_df):
+    def process_folder(self, source_base_dir, destination_base_dir, mapping_df, lookup_dict):
         # update the status bar
         self.status_label.setText('Counting files.')
         # process GUI events to reflect the update value
@@ -329,6 +335,7 @@ class DicomAnonWidget(QWidget):
         # initialise maps
         uid_map = {}
         study_label_map = {}
+        not_found_patients = []
         # find the patient directories
         patient_dirs_l = [ name for name in os.listdir(source_base_dir) if os.path.isdir(os.path.join(source_base_dir, name)) ]
         if len(patient_dirs_l) == 0:
@@ -342,8 +349,13 @@ class DicomAnonWidget(QWidget):
                 except Exception as e:
                     self._display_error(f"Error parsing patient ID: {e}")
                     break
-                new_patient, anon_patient_id = self.get_anon_patient_id(patient_id, mapping_df)
-                anon_patient_folder_name = 'Brain-{:04d}'.format(anon_patient_id)
+                patient_id_str = str(patient_id)
+                if patient_id_str not in lookup_dict:
+                    print('patient ID {} not found in lookup file - skipping'.format(patient_id))
+                    not_found_patients.append(patient_id_str)
+                    continue
+                anon_patient_folder_name = lookup_dict[patient_id_str]
+                new_patient = self._is_new_patient(patient_id, mapping_df)
                 anon_patient_dir = destination_base_dir + os.sep + anon_patient_folder_name
                 patient_full_dir = source_base_dir + os.sep + patient_dir
                 dicom_files = glob.glob('{}/**/*.dcm'.format(patient_full_dir), recursive=True)
@@ -353,7 +365,7 @@ class DicomAnonWidget(QWidget):
                 QApplication.processEvents()
                 for source_file in dicom_files:
                     rel_path = os.path.relpath(source_file, patient_full_dir)  # use the same relative path for source and target
-                    anon_patient_file = anon_patient_dir + os.sep + rel_path   # add the relative path to the 'Brain-nnnn' directory
+                    anon_patient_file = anon_patient_dir + os.sep + rel_path   # add the relative path to the anon directory
                     # load and process the file
                     try:
                         ds = dcmread(source_file)
@@ -373,8 +385,9 @@ class DicomAnonWidget(QWidget):
                     # update count of files processed
                     dicom_files_processed += 1
                     # update the progress bar
-                    proportion_completed = int((dicom_files_processed)/dicom_files_count*100)
-                    self.pbar.setValue(proportion_completed)
+                    if dicom_files_count > 0:
+                        proportion_completed = int((dicom_files_processed)/dicom_files_count*100)
+                        self.pbar.setValue(proportion_completed)
                     # process GUI events to reflect the update value
                     QApplication.processEvents()
                 # count the total sessions anonymised for this patient
@@ -387,7 +400,7 @@ class DicomAnonWidget(QWidget):
                 # add or update the mapping
                 date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 if new_patient:
-                    row = pd.Series({'patient_id':patient_id, 'anon_patient_dir_name':anon_patient_folder_name, 'anon_patient_id':anon_patient_id, 'total_session_count':session_count, 'valid_file_count':valid_file_count, 'invalid_file_count':invalid_file_count, 'last_updated':date_str})
+                    row = pd.Series({'patient_id':patient_id, 'anon_patient_dir_name':anon_patient_folder_name, 'total_session_count':session_count, 'valid_file_count':valid_file_count, 'invalid_file_count':invalid_file_count, 'last_updated':date_str})
                     mapping_df = pd.concat([mapping_df, pd.DataFrame([row], columns=row.index)]).reset_index(drop=True)
                 else:
                     row_index = mapping_df.loc[mapping_df['patient_id'] == patient_id].index[0]
@@ -396,44 +409,72 @@ class DicomAnonWidget(QWidget):
                     mapping_df.loc[row_index, 'valid_file_count'] += valid_file_count
                     mapping_df.loc[row_index, 'invalid_file_count'] += invalid_file_count
 
-        return mapping_df
+        return mapping_df, not_found_patients
 
     def anon_button_clicked(self):
         # get the file names under the directory selected
-        if self.source_dir != "":
-            # update the progress bar
-            self.pbar.setValue(0)
-            self.pbar.setVisible(True)
-            QApplication.processEvents()
-            # disable buttons
-            self.source_button.setEnabled(False)
-            self.destination_button.setEnabled(False)
-            self.anon_button.setEnabled(False)
-            # set up the mapping file
-            mapping_file = '{}dicom-anon-mapping.xlsx'.format(expanduser('~')+os.sep)
-            if os.path.isfile(mapping_file):
-                mapping_df = pd.read_excel(mapping_file, index_col=0)
-            else:
-                mapping_df = None
-            # process UI events
-            QApplication.processEvents()
-            # process the DICOMs within
-            mapping_df = self.process_folder(self.source_dir, self.destination_dir, mapping_df)
-            # process UI events
-            QApplication.processEvents()
-            # update the status bar
-            self.status_label.setText('Saving the ID mapping file.')
-            # update the mapping file
-            if mapping_df is not None:
-                mapping_df.to_excel(mapping_file)
-            # process UI events
-            QApplication.processEvents()
-            # enable buttons
+        if self.source_dir == "":
+            self._display_error("Please select a source folder.")
+            return
+        if self.lookup_file == "":
+            self._display_error("Please select an ID lookup file.")
+            return
+        # update the progress bar
+        self.pbar.setValue(0)
+        self.pbar.setVisible(True)
+        QApplication.processEvents()
+        # disable buttons
+        self.source_button.setEnabled(False)
+        self.destination_button.setEnabled(False)
+        self.lookup_button.setEnabled(False)
+        self.anon_button.setEnabled(False)
+        # load the lookup file
+        try:
+            lookup_dict = self._load_lookup(self.lookup_file)
+        except Exception as e:
+            self._display_error(f"Failed to load lookup file: {e}")
             self.source_button.setEnabled(True)
             self.destination_button.setEnabled(True)
+            self.lookup_button.setEnabled(True)
             self.anon_button.setEnabled(True)
-            # update the status bar
-            self.status_label.setText('Finished processing.')
+            return
+        # set up the mapping file
+        mapping_file = '{}dicom-anon-mapping.xlsx'.format(expanduser('~')+os.sep)
+        if os.path.isfile(mapping_file):
+            mapping_df = pd.read_excel(mapping_file, index_col=0)
+        else:
+            mapping_df = None
+        # process UI events
+        QApplication.processEvents()
+        # process the DICOMs within
+        mapping_df, not_found_patients = self.process_folder(self.source_dir, self.destination_dir, mapping_df, lookup_dict)
+        # process UI events
+        QApplication.processEvents()
+        # update the status bar
+        self.status_label.setText('Saving the ID mapping file.')
+        # update the mapping file
+        if mapping_df is not None:
+            mapping_df.to_excel(mapping_file)
+        # process UI events
+        QApplication.processEvents()
+        # enable buttons
+        self.source_button.setEnabled(True)
+        self.destination_button.setEnabled(True)
+        self.lookup_button.setEnabled(True)
+        self.anon_button.setEnabled(True)
+        # update the status bar
+        self.status_label.setText('Finished processing.')
+        # report patients not found in the lookup
+        if not_found_patients:
+            patient_list = '\n'.join(f'  - {pid}' for pid in not_found_patients)
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setWindowTitle("Patients Not Processed")
+            msg.setText(
+                f"The following {len(not_found_patients)} patient(s) were not found in the "
+                f"lookup file and were not processed:\n\n{patient_list}"
+            )
+            msg.exec()
 
     def source_button_clicked(self):
         # update the progress bar
@@ -454,6 +495,17 @@ class DicomAnonWidget(QWidget):
         self.destination_dir = str(QFileDialog.getExistingDirectory(self, "Select Directory"))
         if self.destination_dir != "":
             self.destination_label.setText(self.destination_dir)
+
+    def lookup_button_clicked(self):
+        # update the progress bar
+        self.pbar.setValue(0)
+        # update the status bar
+        self.status_label.setText('')
+
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select ID Lookup File", "", "Excel Files (*.xlsx *.xls)")
+        if file_path:
+            self.lookup_file = file_path
+            self.lookup_label.setText(file_path)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
