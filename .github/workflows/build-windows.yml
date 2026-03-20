@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'   # Triggers on tags like v1.0.0, v2.1.3, etc.
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -12,9 +15,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
           python-version: '3.11'
 
@@ -27,9 +34,22 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller DicomAnon-Windows.spec
 
+      - name: Smoke test EXE
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath "dist\DicomAnon.exe" -PassThru
+          Start-Sleep -Seconds 5
+          if ($proc.HasExited) {
+            Write-Error "DicomAnon.exe exited early (exit code $($proc.ExitCode)) — packaging likely failed"
+            exit 1
+          }
+          Stop-Process -Id $proc.Id
+          Write-Host "Smoke test passed — EXE ran for 5 seconds without crashing"
+
       - name: Upload EXE to GitHub Release
         uses: softprops/action-gh-release@v2
-        with:
-          files: dist/DicomAnon.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+        with:
+          files: dist/DicomAnon.exe
