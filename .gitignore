@@ -1,6 +1,5 @@
 .ipynb_checkpoints
 build
 dist
-*.spec
 .DS_Store
 .DS_Store
