@@ -1,4 +1,8 @@
 pydicom==2.4.3
 pandas==2.2.2
 PyQt6==6.6.1
+# PyQt6-Qt6 ships the Qt libraries themselves and is only loosely constrained by
+# PyQt6, so leaving it unpinned installs the newest Qt against 6.6.1 bindings and
+# the app fails at startup with a missing symbol. Keep this matched to PyQt6.
+PyQt6-Qt6==6.6.1
 openpyxl==3.1.2
