@@ -83,7 +83,19 @@ On completion, DicomAnon will save a mapping of the true patient IDs to anonymis
 Note that adding new patient folders (and updates to existing patient folders) will not erase previous DICOM files for the same patient; the new anonymised DICOM files will be saved in the same structure alongside those previously processed. The new patient IDs will also be added to the Excel mapping spreadsheet.
 
 ## Installation
-Unzip the downloaded file and move it to a convenient place, alongside your other utility applications.
+Downloads for both Windows and macOS are attached to each release on the [Releases](https://github.com/rmit-medical-radiations/DicomAnon/releases) page. Open the most recent release and download the file for your platform.
+
+### Windows
+Download `DicomAnon.exe` and move it to a convenient place, alongside your other utility applications. There is no installer - the `.exe` runs as-is.
+
+Windows may show a "Windows protected your PC" warning the first time you run it, because the application is not code-signed. Click `More info`, then `Run anyway`.
+
+### macOS
+Download `DicomAnon-macOS.zip`, unzip it, and drag `DicomAnon.app` to your `Applications` folder.
+
+The application is not signed or notarised, so macOS will refuse to open it the first time with a message saying it is damaged or cannot be checked for malicious software. To get past this, right-click (or Control-click) `DicomAnon.app` and choose `Open` from the menu, then click `Open` in the dialog that appears. You only need to do this once.
+
+Note that the macOS build is for Apple Silicon Macs (M1 and later). It will not run on older Intel Macs.
 
 ## Usage
 1. Start the application and select the parent folder of the patient folders containing the DICOM files to be anonymised (i.e. the `source` folder)
