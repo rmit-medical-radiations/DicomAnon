@@ -466,7 +466,8 @@ class DicomAnonWidget(QWidget):
         # update the status bar
         self.status_label.setText('Saving the ID mapping file.')
         # update the mapping file
-        if mapping_df is not None:
+        mapping_saved = mapping_df is not None
+        if mapping_saved:
             mapping_df.to_excel(mapping_file)
         # process UI events
         QApplication.processEvents()
@@ -487,6 +488,19 @@ class DicomAnonWidget(QWidget):
                 f"The following {len(not_found_patients)} patient(s) were not found in the "
                 f"lookup file and were not processed:\n\n{patient_list}"
             )
+            msg.exec()
+        # tell the user where the ID mapping file was saved
+        if mapping_saved:
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Icon.Information)
+            msg.setWindowTitle("Finished Processing")
+            msg.setText("Finished processing.")
+            msg.setInformativeText(
+                "The spreadsheet mapping the real patient IDs to the anonymised patient IDs "
+                f"has been saved here:\n\n{os.path.normpath(mapping_file)}\n\n"
+                "Keep this file safe - it is the only record linking the real and anonymised IDs."
+            )
+            msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             msg.exec()
 
     def source_button_clicked(self):
