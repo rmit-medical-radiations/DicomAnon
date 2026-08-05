@@ -12,7 +12,8 @@ builds ship. Nothing outstanding.
 The broken `DicomAnon.exe` assets were deleted from the v0.4 and v0.5 releases,
 so neither release has any assets now. The tags are untouched and both are still
 rebuildable from source. v0.4 had been downloaded twice, so tell anyone still on
-it to move to v0.7.
+it to move to v0.7. Both release pages now carry a withdrawal warning pointing at
+`/releases/latest`, so they stay correct as new versions ship.
 
 v0.3 and earlier still carry hand-uploaded assets. They predate the GitHub
 Actions builds and have not been checked against this bug.
