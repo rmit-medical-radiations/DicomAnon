@@ -27,20 +27,69 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      # Cheap check against the installed packages, before spending a build on
+      # them. Catches a Qt/bindings mismatch with a readable console traceback.
+      - name: Self-test the dependencies
+        run: python DicomAnon.py --self-test
+
       - name: Build with PyInstaller
         run: pyinstaller DicomAnon-Windows.spec
 
-      - name: Smoke test EXE
+      # The EXE is built windowed (console=False), so an import-time crash puts
+      # up PyInstaller's modal "Unhandled exception in script" dialog and the
+      # process sits there alive. A test that only checks the process is still
+      # running therefore passes on a completely broken build - that is how the
+      # v0.4 and v0.5 EXEs shipped. Wait on the exit code instead, and treat
+      # "still running" as the failure it is.
+      - name: Self-test EXE
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $report = "$PWD\self-test-report.txt"
+
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = "$PWD\dist\DicomAnon.exe"
+          $psi.Arguments = "--self-test `"$report`""
+          $psi.UseShellExecute = $false
+          $proc = [System.Diagnostics.Process]::Start($psi)
+
+          if (-not $proc.WaitForExit(60000)) {
+            $proc.Kill()
+            Write-Error "DicomAnon.exe --self-test did not exit within 60s - it is most likely showing the windowed exception dialog. Packaging is broken."
+            exit 1
+          }
+
+          if (Test-Path $report) { Get-Content $report | Write-Host }
+
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "DicomAnon.exe --self-test failed (exit code $($proc.ExitCode))"
+            exit 1
+          }
+          Write-Host "Self-test passed"
+
+      # The self-test runs offscreen, so it never loads the Windows platform
+      # plugin. Launch the real GUI as well to cover qwindows.dll.
+      - name: Smoke test the GUI
         shell: pwsh
         run: |
           $proc = Start-Process -FilePath "dist\DicomAnon.exe" -PassThru
-          Start-Sleep -Seconds 5
+          Start-Sleep -Seconds 8
           if ($proc.HasExited) {
-            Write-Error "DicomAnon.exe exited early (exit code $($proc.ExitCode)) — packaging likely failed"
+            Write-Error "DicomAnon.exe exited early (exit code $($proc.ExitCode)) - packaging likely failed"
             exit 1
           }
-          Stop-Process -Id $proc.Id
-          Write-Host "Smoke test passed — EXE ran for 5 seconds without crashing"
+
+          $proc.Refresh()
+          $title = $proc.MainWindowTitle
+          Write-Host "Main window title: '$title'"
+          if ($title -match 'Unhandled exception|Fatal Error|Failed to execute') {
+            Stop-Process -Id $proc.Id -Force
+            Write-Error "DicomAnon.exe is showing an error dialog: '$title'"
+            exit 1
+          }
+
+          Stop-Process -Id $proc.Id -Force
+          Write-Host "Smoke test passed - GUI ran for 8 seconds without crashing"
 
       - name: Upload EXE to GitHub Release
         shell: pwsh

@@ -2,7 +2,7 @@ import sys
 import glob
 import os
 from PyQt6.QtWidgets import QWidget, QPushButton, QProgressBar, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QApplication, QFileDialog, QLabel, QLineEdit, QMessageBox, QSizePolicy
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QT_VERSION_STR, PYQT_VERSION_STR
 from pydicom import dcmread
 import pandas as pd
 from os.path import expanduser
@@ -534,7 +534,68 @@ class DicomAnonWidget(QWidget):
             self.lookup_file = file_path
             self.lookup_field.setText(file_path)
 
+def self_test(report_path=None):
+    '''Verify the packaged app can actually start, without opening a window.
+
+    Reaching this function already proves the Qt DLLs loaded, since the PyQt6
+    imports at the top of this module run first. The remaining checks catch the
+    mismatch that shipped in v0.4: PyQt6-Qt6 is only loosely constrained by
+    PyQt6, so an unpinned install pairs new Qt libraries with old bindings and
+    the app dies at startup on a missing symbol (macOS) or a missing DLL export
+    (Windows, 'The specified procedure could not be found').
+
+    Returns 0 on success, 1 on failure. Writes a report to report_path if given,
+    because a windowed build has no console to print to.
+    '''
+    lines = []
+    ok = True
+
+    def record(message):
+        lines.append(message)
+
+    record(f'PyQt6 bindings: {PYQT_VERSION_STR}')
+    record(f'Qt libraries:   {QT_VERSION_STR}')
+
+    bindings_series = PYQT_VERSION_STR.split('.')[:2]
+    qt_series = QT_VERSION_STR.split('.')[:2]
+    if bindings_series != qt_series:
+        record(f'FAIL: Qt {QT_VERSION_STR} does not match PyQt6 {PYQT_VERSION_STR} '
+               '- pin PyQt6-Qt6 to the PyQt6 version in requirements.txt')
+        ok = False
+    else:
+        record('OK: Qt libraries match the PyQt6 bindings')
+
+    # Build the real widget offscreen so the check covers QtWidgets and QtGui,
+    # not just the QtCore import that fails first.
+    try:
+        os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+        app = QApplication(sys.argv[:1])
+        app.setStyleSheet(StyleSheet)
+        DicomAnonWidget()
+        record('OK: main window constructed offscreen')
+    except Exception as e:
+        record(f'FAIL: could not construct the main window: {e!r}')
+        ok = False
+
+    record('SELF TEST PASSED' if ok else 'SELF TEST FAILED')
+    report = '\n'.join(lines)
+
+    if report_path:
+        with open(report_path, 'w') as f:
+            f.write(report + '\n')
+    try:
+        print(report)
+    except Exception:
+        pass  # a windowed build has no stdout to write to
+
+    return 0 if ok else 1
+
+
 if __name__ == "__main__":
+    if '--self-test' in sys.argv:
+        args = [a for a in sys.argv[1:] if a != '--self-test']
+        sys.exit(self_test(args[0] if args else None))
+
     app = QApplication(sys.argv)
     app.setStyleSheet(StyleSheet)
     widget = DicomAnonWidget()

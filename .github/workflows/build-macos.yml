@@ -27,8 +27,17 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      # Cheap check against the installed packages, before spending a build on
+      # them. Catches a Qt/bindings mismatch with a readable console traceback.
+      - name: Self-test the dependencies
+        run: python DicomAnon.py --self-test
+
       - name: Build with PyInstaller
         run: pyinstaller DicomAnon.spec
+
+      - name: Self-test app bundle
+        timeout-minutes: 3
+        run: dist/DicomAnon.app/Contents/MacOS/DicomAnon --self-test
 
       - name: Smoke test app bundle
         run: |
