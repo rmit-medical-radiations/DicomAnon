@@ -9,8 +9,13 @@ a `v*` tag (`.github/workflows/build-windows.yml`, `build-macos.yml`).
 **2026-08-05: v0.7 released.** Fixes the CI blind spot that let broken Windows
 builds ship. Nothing outstanding.
 
-Tell anyone still on v0.4 to upgrade. v0.4 and v0.5 are broken on Windows and
-should not be used.
+The broken `DicomAnon.exe` assets were deleted from the v0.4 and v0.5 releases,
+so neither release has any assets now. The tags are untouched and both are still
+rebuildable from source. v0.4 had been downloaded twice, so tell anyone still on
+it to move to v0.7.
+
+v0.3 and earlier still carry hand-uploaded assets. They predate the GitHub
+Actions builds and have not been checked against this bug.
 
 ## Decision log
 
