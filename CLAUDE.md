@@ -18,10 +18,19 @@ enforced: a patient's folder assignment is permanent, and a lookup file that mov
 patient or reassigns their folder stops the run. The mapping file now opens on a
 DO NOT EDIT sheet, keeps a `.bak`, and holds the date offsets.
 
-Defects 1, 5, 6 and 7 are now addressed. **Still open: 2, 3 and 4** (uid_map not
-persisted, uid_map shared across patients, and version mixing in an accumulating
-destination). Defect 3 in particular still needs the global source-UID index described
-below, or fixing it will destroy the cross-folder detector.
+**2026-08-13: defects 2, 3 and 4 fixed.** Per-patient state under
+`~/.dicom-anon-state/<destination key>/` persists `uid_map` and `study_label_map`, so
+pseudonyms are stable between runs and scoped to one patient. `TOOL_VERSION` is recorded
+per patient, and a run stops rather than mixing versions in one folder or writing into a
+destination it has no record of.
+
+**All seven defects are now addressed.** The remaining work is deployment and
+measurement, not analysis. Two consequences worth stating plainly:
+
+- **The existing export has to be rebuilt.** It has no state, so the tool will refuse to
+  add to it, by design. It also predates every fix: real times, a recoverable 30-day
+  shift, unstable UIDs, and the 33% of series still in a 2025-era state.
+- **Nothing here has run against real data.** Every test is synthetic fixtures.
 
 **2026-08-13: DicomAnon now verifies every file it writes and stops the run on failure**,
 including the check that an anon folder only ever receives one source patient, which is
@@ -52,18 +61,23 @@ Next, in this order:
    Needs nobody else, and it is the first real measurement of how bad the existing
    export is. `check_identity` in `gbm-mrlinac`'s `check-patient-integrity.py` already
    does the birth year and sex part there and should keep being run.
-2. **Duplicate `anon_patient_dir_name` in `dicom-anon-mapping.xlsx`**, which settles
+2. **Release v0.8 and get the researcher onto it**, so no further unguarded output is
+   produced. Every run until then has none of these checks.
+3. **Plan the rebuild.** The existing export cannot be added to and has to be
+   reprocessed from source into a fresh destination. Worth confirming the hospital still
+   holds the source for all 33 patients before promising anything downstream, because
+   any patient whose source is gone cannot be brought up to the current version at all.
+4. **Duplicate `anon_patient_dir_name` in `dicom-anon-mapping.xlsx`**, which settles
    path B on its own and needs no DICOM reads. The file is in the researcher's home
    folder at the hospital, so this one needs them to send it.
-3. **Release a build with the in-app checks and get the researcher onto it**, so no
-   further contaminated output can be produced. Until then every run is unguarded.
-4. **Ask the hospital programmer what their export script groups files by.** Now that
+5. **Ask the hospital programmer what their export script groups files by.** Now that
    the in-app check exists, this decides what the failure dialogs will actually mean
    when they fire, and whether a source folder can legitimately hold two patient IDs.
 
-Still open, and not addressed by any of the above: defects 1 to 4. Defect 1 in
-particular is what `verify_file(check_dates=True)` is waiting on, and the switch is
-already in place for when it is fixed.
+Smaller things noted and not done: per-file orphan detection (a file deleted from the
+source stays in the destination unnoticed), and the two loop bugs from the defect 6
+entry, the `break` at a parse failure and the unguarded `os.listdir` on an empty
+patient folder.
 
 **2026-08-12: five defects found by analysing a real export.** See the decision log
 below. In severity order:
@@ -100,6 +114,60 @@ v0.3 and earlier still carry hand-uploaded assets. They predate the GitHub
 Actions builds and have not been checked against this bug.
 
 ## Decision log
+
+### 2026-08-13: defects 2, 3 and 4, and the state store they all needed
+
+All three were the same missing thing: nothing survived a run. `uid_map` and
+`study_label_map` were created inside `process_folder`, empty, once per run, and shared
+by every patient. That single line is defect 2 (nothing persists) and defect 3 (nothing
+is scoped) at once, and defect 4 is what happens when the destination remembers more
+than the tool does.
+
+**The state store.** One JSON file per anon folder, under `~/.dicom-anon-state/<key>/`
+where the key is a hash of the destination path. Per patient it holds `uid_map`,
+`study_label_map`, `source_patient_ids`, `tool_version`, and `files` mapping each
+written relative path to the version that wrote it. Written through a temporary file and
+renamed, like the mapping file, because losing it reintroduces defect 2 exactly.
+
+Placement follows rule 2. Outside the destination, because it holds source UIDs and
+hospital IDs and would otherwise be delivered along with the data it de-identifies.
+Keyed to the destination rather than loose in the home folder, so pointing the tool at a
+different output folder cannot silently reuse another delivery's UID map. The rule also
+says to exit non-zero if the state is missing; the GUI equivalent is refusing to write
+into a destination it has no record of, below.
+
+**Defect 3, without losing the detector.** `uid_map` is now per patient, so two patients
+can never share a pseudonym. The earlier entry warned that this would destroy the
+cross-folder detector that existed only because the map was global. It turned out the
+detector was not worth rebuilding as a UID index: an 800k-entry file to catch something
+the source PatientID already catches directly. What was needed instead is
+`recorded_owners`, which seeds `RunVerifier` from the state with every source PatientID
+seen in an earlier run. Cheap, and it closes the one gap the within-run check has: a
+folder filled *entirely* from the wrong source patient has no within-run conflict to
+notice.
+
+**Defect 4 has two halves and they need different answers.**
+
+- *Unrecorded output.* A destination holding data with no state was written by a build
+  with none of the current checks, and its UID maps and offsets cannot be reconstructed.
+  Rule 4 says never to write current-version files beside older ones, so the run stops
+  and asks for a fresh destination. This is the documented supported path from the
+  original analysis, now enforced rather than suggested. Note the consequence: **the
+  existing export cannot be added to and has to be rebuilt.**
+- *A version change.* `TOOL_VERSION` is recorded per patient. If it is older, every file
+  already written for that patient must be produced again. `stale_files` compares what
+  is recorded against what this run would write, and the run stops listing exactly what
+  the source can no longer produce. That is the "refuse and list" branch; reprocessing
+  happens naturally when the source still holds everything, because paths mirror the
+  source and writing is idempotent (rule 3).
+
+`TOOL_VERSION` is `0.8` and must be bumped whenever a change alters what the anonymiser
+writes, or a patient's folder will silently mix two versions of the output.
+
+Rule 5's orphan check is what `unrecorded_folders` implements, at folder granularity
+rather than per file. Per-file orphan detection is still not done: a file deleted from
+the source stays in the destination and nothing notices, as long as its folder is
+recorded.
 
 ### 2026-08-13: defect 1 fixed, and the offset became the thing that matters
 

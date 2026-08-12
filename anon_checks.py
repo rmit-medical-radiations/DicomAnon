@@ -23,10 +23,18 @@ it blanks nothing and the tag survives in every file ever written.
 """
 import collections
 import datetime
+import hashlib
+import json
+import os
 import re
 import secrets
 
 from pydicom.datadict import tag_for_keyword
+
+# Bumped whenever a change alters what the anonymiser writes. A patient whose folder was
+# written by an older version cannot have new files added beside the old ones (defect 4),
+# so this is compared against the version recorded in that patient's state.
+TOOL_VERSION = '0.8'
 
 STUDY_ID_RE = re.compile(r'STUDY_\d+$')
 
@@ -533,6 +541,114 @@ def check_assignments(lookup, recorded):
                 'the lookup file gives folder {!r} to patient {}, but that folder '
                 'already holds patient {}'.format(folder, hospital_id, owner))
     return problems
+
+
+def state_dir_for(destination_dir, home):
+    """Where this destination's state lives. Never inside the destination itself.
+
+    The state holds source UIDs and hospital patient IDs, so it is re-identifying and
+    must not travel with the delivery. It is keyed to the destination rather than kept
+    loose in the home folder, so pointing the tool at a different output folder cannot
+    quietly reuse another delivery's UID maps.
+    """
+    key = hashlib.sha1(os.path.abspath(destination_dir).encode('utf-8')).hexdigest()[:16]
+    return os.path.join(home, '.dicom-anon-state', key)
+
+
+def load_patient_state(state_dir, anon_folder):
+    """This patient's recorded state, or None if they have never been processed here."""
+    path = os.path.join(state_dir, '{}.json'.format(anon_folder))
+    if not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
+def save_patient_state(state_dir, anon_folder, state):
+    """Write state through a temporary file, so a crash cannot truncate it.
+
+    Losing this file loses the UID map, which means the next run pseudonymises the same
+    source UIDs differently and produces the undetectable duplicates of defect 2.
+    """
+    os.makedirs(state_dir, exist_ok=True)
+    path = os.path.join(state_dir, '{}.json'.format(anon_folder))
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(state, f)
+    os.replace(tmp, path)
+
+
+def new_patient_state(anon_folder, patient_id):
+    return {
+        'anon_folder': anon_folder,
+        'patient_id': patient_id,
+        'source_patient_ids': [],
+        'tool_version': TOOL_VERSION,
+        'uid_map': {},
+        'study_label_map': {},
+        'files': {},
+        'permanently_stale': [],
+    }
+
+
+def recorded_owners(state_dir):
+    """{source PatientID: anon folder} across every patient recorded for this delivery.
+
+    Seeds RunVerifier so contamination is caught across runs, not just within one. If a
+    whole folder is filled from the wrong source patient there is no within-run conflict
+    to notice, and this is what catches it.
+    """
+    owners = {}
+    if not os.path.isdir(state_dir):
+        return owners
+    for name in sorted(os.listdir(state_dir)):
+        if not name.endswith('.json'):
+            continue
+        try:
+            with open(os.path.join(state_dir, name)) as f:
+                state = json.load(f)
+        except (OSError, ValueError):
+            continue
+        for source_id in state.get('source_patient_ids', []):
+            owners[str(source_id)] = state.get('anon_folder', name[:-5])
+    return owners
+
+
+def unrecorded_folders(destination_dir, state_dir):
+    """Anon folders holding files that no state file accounts for.
+
+    On a destination written before state tracking existed, that is all of them. Those
+    files were produced by a build with none of the current checks, and rule 4 says new
+    files at the current version must never be written beside them. There is no way to
+    reconstruct their UID maps or offsets after the fact, so the only correct answer is
+    a fresh destination.
+    """
+    if not os.path.isdir(destination_dir):
+        return []
+    recorded = set()
+    if os.path.isdir(state_dir):
+        recorded = {n[:-5] for n in os.listdir(state_dir) if n.endswith('.json')}
+    unrecorded = []
+    for name in sorted(os.listdir(destination_dir)):
+        folder = os.path.join(destination_dir, name)
+        if not os.path.isdir(folder) or name in recorded:
+            continue
+        if any(f.lower().endswith('.dcm') for _, _, files in os.walk(folder)
+               for f in files):
+            unrecorded.append(name)
+    return unrecorded
+
+
+def stale_files(state, planned_paths):
+    """Recorded files at an older version that this run would not rewrite (defect 4).
+
+    A version change means everything in the folder has to be written again. Whatever
+    the source can no longer produce cannot be brought up to date, and mixing it with
+    current output is exactly how a third of the export kept its 2025-era state.
+    """
+    planned = set(planned_paths)
+    return sorted(path for path, version in state.get('files', {}).items()
+                  if version != TOOL_VERSION and path not in planned)
 
 
 class RunVerifier:

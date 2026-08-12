@@ -90,6 +90,25 @@ On completion, DicomAnon will save a mapping of the true patient IDs to anonymis
 
 Note that adding new patient folders (and updates to existing patient folders) will not erase previous DICOM files for the same patient; the new anonymised DICOM files will be saved in the same structure alongside those previously processed. The new patient IDs will also be added to the Excel mapping spreadsheet.
 
+## Adding new studies to a patient later
+This is the normal way the tool is used: a patient accrues sessions over weeks, and each batch is anonymised into the folder they already have. For that to be safe, DicomAnon has to remember what it did last time, so it keeps a record for each output folder.
+
+That record holds the map from real UIDs to anonymised ones, the study numbering, and which version of DicomAnon wrote each file. Keeping it is what makes the following true:
+
+* the same real UID always becomes the same anonymised UID, so a new study that refers to an earlier one still resolves. Structure sets reference series, and registrations match frames of reference, by UID: without this those links break silently;
+* `STUDY_0001`, `STUDY_0002` and so on keep counting rather than restarting at 1 each run;
+* two different patients never receive the same anonymised UID, even where their original files shared one, which vendor-generated UIDs often do.
+
+The record is stored **outside** the output folder, under `.dicom-anon-state` in your home folder, because it contains real UIDs and patient IDs. Like the mapping spreadsheet, it must never be copied to whoever receives the anonymised files. It is tied to the specific output folder it describes, so using a different output folder starts a fresh record rather than silently reusing another delivery's.
+
+**Keep it.** If it is lost, DicomAnon cannot add to those folders safely and will say so.
+
+### When DicomAnon refuses to add to a folder
+Two situations stop a run rather than producing output that cannot be trusted:
+
+* **The output folder contains data DicomAnon has no record of.** This is what you get when pointing a new version at a folder filled by an older one. The UID maps and date offsets used back then cannot be reconstructed, so nothing new can safely be added beside that data. Process the source into a new, empty output folder instead.
+* **A patient was last processed by an older version of DicomAnon.** Everything already written for them has to be produced again with the current version, so that one folder never holds two different versions of the anonymisation. If the source no longer has all of that patient's data, DicomAnon lists exactly which files it cannot reproduce.
+
 ## Checks that can stop a run
 DicomAnon checks every file it anonymises before writing it, and stops the whole run if a check fails rather than carrying on and producing output nobody can trust. A dialog names the source file and what was wrong, and the same text is saved to `dicom-anon-verification.txt` in your home folder so you can send it on.
 

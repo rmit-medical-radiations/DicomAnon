@@ -11,9 +11,12 @@ from datetime import datetime
 from pydicom.dataset import Dataset
 from pydicom.uid import generate_uid
 from pydicom.multival import MultiValue
-from anon_checks import (IDENTIFYING_KEYWORDS, RunVerifier, VerificationError,
-                         check_assignments, check_lookup, new_offsets, shift_dates,
-                         snapshot_source, validate_keywords, verify_file)
+from anon_checks import (IDENTIFYING_KEYWORDS, TOOL_VERSION, RunVerifier,
+                         VerificationError, check_assignments, check_lookup,
+                         load_patient_state, new_offsets, new_patient_state,
+                         recorded_owners, save_patient_state, shift_dates,
+                         snapshot_source, stale_files, state_dir_for,
+                         unrecorded_folders, validate_keywords, verify_file)
 
 
 StyleSheet = '''
@@ -44,6 +47,8 @@ class DicomAnonWidget(QWidget):
         self.lookup_file = ""
         self.verifier = RunVerifier()
         self.mapping_file = '{}dicom-anon-mapping.xlsx'.format(expanduser('~') + os.sep)
+        # where per-destination state lives; an attribute so tests can redirect it
+        self.state_home = expanduser('~')
 
         BROWSE_WIDTH = 100
 
@@ -479,9 +484,23 @@ class DicomAnonWidget(QWidget):
         self.status_label.setText('Found {} files.'.format(dicom_files_count))
         # process GUI events to reflect the update value
         QApplication.processEvents()
-        # initialise maps
-        uid_map = {}
-        study_label_map = {}
+        # Per-patient state, kept outside the destination because it holds source UIDs
+        # and hospital IDs. uid_map and study_label_map used to be created here, empty,
+        # once per run and shared by every patient: defects 2 and 3 in one line.
+        state_dir = state_dir_for(destination_base_dir, self.state_home)
+        orphans = unrecorded_folders(destination_base_dir, state_dir)
+        if orphans:
+            raise VerificationError(
+                'The output folder already contains anonymised data that this tool has '
+                'no record of, in:\n\n{}\n\nThat data was written by an older version, '
+                'before the current checks existed. Its UID maps and date offsets cannot '
+                'be reconstructed, so new files cannot safely be added beside it.\n\n'
+                'Choose a new, empty output folder and process the source into that.'
+                .format('\n'.join('  - ' + name for name in orphans)))
+        # seed from previous runs, so a folder filled entirely from the wrong source
+        # patient is caught even though nothing conflicts within this run
+        for source_id, folder in recorded_owners(state_dir).items():
+            self.verifier.record(source_id, folder)
         not_found_patients = []
         # find the patient directories
         patient_dirs_l = [ name for name in os.listdir(source_base_dir) if os.path.isdir(os.path.join(source_base_dir, name)) ]
@@ -525,6 +544,29 @@ class DicomAnonWidget(QWidget):
                 anon_patient_dir = destination_base_dir + os.sep + anon_patient_folder_name
                 patient_full_dir = source_base_dir + os.sep + patient_dir
                 dicom_files = glob.glob('{}/**/*.dcm'.format(patient_full_dir), recursive=True)
+                # this patient's own maps, reloaded from the last run. A fresh map would
+                # give the same source UID a new pseudonym (defect 2), and a shared one
+                # would link patients through a UID they have in common (defect 3).
+                state = (load_patient_state(state_dir, anon_patient_folder_name)
+                         or new_patient_state(anon_patient_folder_name, patient_id))
+                uid_map = state['uid_map']
+                study_label_map = state['study_label_map']
+                planned = [os.path.relpath(f, patient_full_dir) for f in dicom_files]
+                stranded = stale_files(state, planned)
+                if stranded:
+                    raise VerificationError(
+                        'Patient {} was last anonymised by version {}, and this is '
+                        'version {}. Everything already written for them has to be '
+                        'produced again, but the source no longer contains {} of those '
+                        'files:\n\n{}\n\nWriting new files beside them would leave one '
+                        'folder holding two different versions of the anonymisation. '
+                        'Restore the missing source data, or process this patient into '
+                        'a new, empty output folder.'.format(
+                            patient_id, state.get('tool_version', 'an older version'),
+                            TOOL_VERSION, len(stranded),
+                            '\n'.join('  - ' + p for p in stranded[:10])
+                            + ('\n  ... and {} more'.format(len(stranded) - 10)
+                               if len(stranded) > 10 else '')))
                 # update the status bar
                 self.status_label.setText('Processing patient ID {}'.format(patient_id))
                 # process GUI events to reflect the update value
@@ -569,6 +611,11 @@ class DicomAnonWidget(QWidget):
                         if not os.path.exists(target_dir):
                             os.makedirs(target_dir)
                         ds.save_as(anon_patient_file)
+                        # record what was written and at which version, so a later run
+                        # can tell current output from output it must not write beside
+                        state['files'][rel_path] = TOOL_VERSION
+                        if source['patient_id'] and source['patient_id'] not in state['source_patient_ids']:
+                            state['source_patient_ids'].append(source['patient_id'])
                     # update count of files processed
                     dicom_files_processed += 1
                     # update the progress bar
@@ -601,6 +648,9 @@ class DicomAnonWidget(QWidget):
                 # offsets are only reusable if they survive, and a run that stops on a
                 # failed check must not lose the offsets it has already written files with.
                 self._save_mapping(mapping_df, self.mapping_file)
+                # the UID map is only worth having if it outlives the run that built it
+                state['tool_version'] = TOOL_VERSION
+                save_patient_state(state_dir, anon_patient_folder_name, state)
 
         return mapping_df, not_found_patients
 
