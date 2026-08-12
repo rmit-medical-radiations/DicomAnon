@@ -6,9 +6,17 @@ a `v*` tag (`.github/workflows/build-windows.yml`, `build-macos.yml`).
 
 ## Current status / next steps
 
-**2026-08-13: defect 7, `PhysiciansReadingStudy` is not a DICOM keyword**, so that tag
-has never been blanked in any release despite the README saying it is. Found on the
-first run of the new check. See the decision log.
+**2026-08-13: DicomAnon now verifies every file it writes and stops the run on failure**,
+including the check that an anon folder only ever receives one source patient, which is
+the direct test for defect 6. It lives in the app because the hospital runs a frozen
+binary with no Python, and because mid-run is the only moment the source PatientID still
+exists. `check-anon-output.py` is the weaker second look at the university end.
+
+Defect 7 is fixed: `PhysiciansReadingStudy` was not a DICOM keyword, so that tag was
+never blanked in any release despite the README saying it was. `--self-test` now
+validates the list so CI catches a repeat.
+
+Untested against real data. Everything so far is synthetic fixtures.
 
 **2026-08-13: defect 6, studies from another patient can be written to a patient's
 folder.** The destination folder is chosen entirely from the source folder's *name*,
@@ -21,24 +29,24 @@ stable. Note that **the defect 5 assertion list does not catch it**: every asser
 there checks that identifiers were removed, none checks that a file belongs to the
 patient whose folder it landed in.
 
-`check-anon-output.py` is written and tested against synthetic data covering each
-finding, but **has not been run against the real export**. Next, in this order:
+Next, in this order:
 
-1. **Run `check-anon-output.py` against the export copy on the university server.** It
-   is standalone, so it runs there as well as at the hospital. It needs nobody else.
-   Note that `check_identity` in `gbm-mrlinac`'s `check-patient-integrity.py` already
-   does the birth year and sex part at the university end and should keep being run.
+1. **Run `check-anon-output.py` against the export copy on the university server.**
+   Needs nobody else, and it is the first real measurement of how bad the existing
+   export is. `check_identity` in `gbm-mrlinac`'s `check-patient-integrity.py` already
+   does the birth year and sex part there and should keep being run.
 2. **Duplicate `anon_patient_dir_name` in `dicom-anon-mapping.xlsx`**, which settles
    path B on its own and needs no DICOM reads. The file is in the researcher's home
    folder at the hospital, so this one needs them to send it.
-3. **Ask the hospital programmer what their export script groups files by.** This
-   decides whether the source-side identity check is worth building or is tautological,
-   so it gates the tool change rather than following it.
-4. **Decide what `PatientAccountNumber` was meant to be** and fix defect 7's two dead
-   keyword entries.
+3. **Release a build with the in-app checks and get the researcher onto it**, so no
+   further contaminated output can be produced. Until then every run is unguarded.
+4. **Ask the hospital programmer what their export script groups files by.** Now that
+   the in-app check exists, this decides what the failure dialogs will actually mean
+   when they fire, and whether a source folder can legitimately hold two patient IDs.
 
-Then the source-side patient identity check in the tool, if step 3 says it has power,
-and get `check-anon-output.py` into the researcher's hands as a gate on delivery.
+Still open, and not addressed by any of the above: defects 1 to 4. Defect 1 in
+particular is what `verify_file(check_dates=True)` is waiting on, and the switch is
+already in place for when it is fixed.
 
 **2026-08-12: five defects found by analysing a real export.** See the decision log
 below. In severity order:
@@ -92,21 +100,61 @@ it was meant to cover survives untouched. Two of the 46 entries are dead:
   DICOM keyword, so it is not clear which tag was intended. Decide what it was for and
   either name that tag or drop the entry.
 
-Neither is fixed yet, because the second needs a decision about intent rather than a
-rename.
+Both are now resolved: the first was renamed, and the second was dropped rather than
+guessed, with a comment in `anon_checks.py` recording that the intent is unknown. If it
+was meant to cover something real, say what and it goes back in. `--self-test` now
+validates the whole list, so CI fails the build if this class of typo returns.
 
 The general lesson is the one from defect 5. A keyword list is checked by nobody at
 runtime, so a typo in it is silent and permanent. `check-anon-output.py` now validates
 the list against the DICOM dictionary on every run, which is why this surfaced
 immediately once something finally looked.
 
-### 2026-08-13: check-anon-output.py, and the division of labour with gbm-mrlinac
+### 2026-08-13: the checks belong in the app, not in a script
 
-`check-anon-output.py` is a standalone, read-only check on the destination folder,
-intended to run **at the hospital, before the output is copied to the university**. It
-needs pydicom and the standard library only: no `config.json`, no prebuilt index, no
-pandas, so it runs where the anonymiser runs and the researcher can run it too. It exits
-non-zero when it finds contamination, so it can gate a delivery.
+**Correcting the entry below, which was written on a wrong assumption.** It said
+`check-anon-output.py` should run at the hospital as the gate before delivery. It
+cannot. The hospital runs the **frozen PyInstaller binary**: no Python interpreter, no
+pydicom, no console. A console script is not something the researcher there can run at
+all, whatever its dependencies. The tool ships as an EXE and an app bundle precisely so
+that none of that has to exist on their machine.
+
+So the verification goes **inside DicomAnon**, which is also where it is strongest. This
+is the point made under defect 6 and not followed through: at the hospital, mid-run, the
+**source PatientID is still in memory**. Checking that one source patient's files reach
+exactly one anon folder, and that one anon folder receives exactly one source patient, is
+a direct test for contamination. It cannot be fooled and it needs no proxy. Everything
+downstream is inference from what survived anonymisation.
+
+What went in:
+
+- `anon_checks.py`, importing nothing but pydicom and the standard library, so the
+  frozen GUI app and the plain-Python console script can share one copy of the logic.
+  `IDENTIFYING_KEYWORDS` moved here from `DicomAnon.py`, so the list that gets blanked
+  and the list that gets checked are the same object. It also has to live outside
+  `DicomAnon.py` because the frozen app has no source file to parse, which is how the
+  first version read it.
+- Per-file verification in `process_folder`, between `anonymise_dicom` and `save_as`.
+  A failure raises `VerificationError` and the run **stops before writing that file**.
+- `RunVerifier`, fed the source PatientID for every file. It reports contamination on
+  the file that first reveals it, rather than at the end of a run that has already
+  scattered files across folders.
+- A dialog naming the source file and the problem in words, saved to
+  `dicom-anon-verification.txt` beside the mapping file. Beside it, not in the
+  destination: it names source patient IDs, so it is re-identifying.
+- `--self-test` now validates the keyword list, so CI fails the build on a defect 7
+  typo rather than the next export discovering it.
+
+Only the source-PatientID checks stop a run. A folder whose birth years disagree while
+its source PatientID stayed constant is a source data quality problem, not
+contamination, and stopping a 760k-file run for it would be wrong. Those warn at the end.
+
+`check-anon-output.py` keeps its place, in the role the correction leaves it: the
+independent check at **the university**, on what actually arrived. It is weaker by
+construction, and it covers the one thing the in-app check never will, which is output
+written by builds that predate the in-app check. That is most of the existing export.
+
+#### What check-anon-output.py does
 
 Checks: `keywords` (defect 7), `identity` (birth year and sex per folder), `labels`
 (PatientID and PatientName must equal the folder name), `stale` (defect 4 leftovers,
@@ -119,22 +167,17 @@ compare-the-year-not-the-date reasoning. That is the right place for it at the
 university, and it should keep being run there. The two are not redundant, they sit at
 different ends of the pipeline:
 
-| | `check-patient-integrity.py` (gbm-mrlinac) | `check-anon-output.py` (here) |
-|---|---|---|
-| runs | university, on the delivered export | hospital, before delivery |
-| needs | repo config, dicom-index.json, conda env | pydicom and stdlib only |
-| finds | contamination that reached the dataset | contamination before it ships |
-| unique | pixel hashing, which is the only thing that catches defect 2's cross-run duplicates | the keyword list, stale files, folder assignment drift |
+| | in-app checks (`anon_checks.py`) | `check-anon-output.py` | `check-patient-integrity.py` (gbm-mrlinac) |
+|---|---|---|---|
+| runs | hospital, during the run | university, on arrival | university, on the built dataset |
+| needs | nothing, it is in the binary | pydicom and stdlib | repo config, dicom-index.json, conda env |
+| sees | source PatientID, so it is definitive | only what survived anonymisation | only what survived anonymisation |
+| unique | stops the run before bad output exists | the keyword list, stale files, assignment drift | pixel hashing, the only thing that catches defect 2's cross-run duplicates |
 
-Deliberately **not** duplicated here: pixel hashing. It is slow, it needs the export
-laid out the way the university has it, and it already exists. If this check passes and
-that one still finds duplicates, the difference is defect 2, since identifiers reset
-between runs and only image content gives those copies away.
-
-The identifying keyword list is read out of `DicomAnon.py` by parsing the source with
-`ast` rather than importing it, since importing pulls in PyQt6 and the hospital machine
-has no reason to have it. That keeps the check from drifting away from what the tool
-actually blanks, which is how defect 7 was found rather than assumed.
+Deliberately **not** duplicated: pixel hashing. It is slow, it needs the export laid out
+the way the university has it, and it already exists. If this check passes and that one
+still finds duplicates, the difference is defect 2, since identifiers reset between runs
+and only image content gives those copies away.
 
 ### 2026-08-13: the pipeline this tool sits in, and what it means for defect 6
 

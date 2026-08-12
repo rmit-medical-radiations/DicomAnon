@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
-"""Check DicomAnon's output folder before it is copied anywhere (read-only).
+"""Double-check an anonymised export after it arrives at the university (read-only).
 
-This is the verification the tool itself lacks (defect 5), in the place it matters:
-run it at the hospital, on the destination folder, BEFORE copying to the university.
-It needs only pydicom and the standard library, no config file and no prebuilt index,
-so the researcher running the anonymiser can run it too.
+DicomAnon verifies as it writes, and that is the check that matters, because it runs at
+the hospital where the source PatientID still exists. This script is the independent
+second look at what actually arrived, for the end that only ever receives anonymised
+folders. It cannot replace the in-app check and is not meant to: once anonymise_dicom
+has run, the source identifiers are gone, so contamination can only be inferred from
+what survives. Two patients of the same sex born in the same year are invisible here.
+
+It also covers what the in-app check cannot: output written by earlier builds, which
+predate the checks entirely and are most of the risk (defect 4).
+
+Needs pydicom and the standard library only, plus anon_checks.py from this repo for the
+identifying keyword list. It exits non-zero on contamination, so it can gate an import.
 
 Four checks, cheapest first:
 
@@ -17,8 +25,8 @@ Four checks, cheapest first:
               is a file that was never anonymised, or one that arrived from elsewhere.
   stale       Files still carrying a real birth date, a raw StudyID, or a populated
               identifying tag. These are live PHI in a folder believed to be anonymised,
-              left by an older build (defect 4). The keyword list is read from
-              DicomAnon.py so it cannot drift from what the tool actually blanks.
+              left by an older build (defect 4). The keyword list comes from
+              anon_checks.py, the same one the anonymiser blanks, so they cannot drift.
   crossfolder One patient's data under two anon folders. Two ways in: a real PatientID
               left by a stale file appearing under two folders (the folder assignment
               drifted, rule 1), or a pseudonymised UID appearing under two folders (one
@@ -26,31 +34,26 @@ Four checks, cheapest first:
 
 What this deliberately does NOT do is hash pixel data. That check already exists, in
 2-mrlinac/convert/check-patient-integrity.py in the gbm-mrlinac repo, and it is the only
-thing that finds copies whose identifiers were reset between runs (defect 2). Run that
-one at the university, on the delivered export. Run this one at the hospital, before
-delivery.
+thing that finds copies whose identifiers were reset between runs (defect 2). Run both.
 
-    python3 check-anon-output.py /path/to/destination
-    python3 check-anon-output.py /path/to/destination --all-files --out report.json
+    python3 check-anon-output.py /path/to/export
+    python3 check-anon-output.py /path/to/export --all-files --out report.json
 """
 import argparse
-import ast
 import collections
 import concurrent.futures
 import json
 import os
-import re
 import sys
 
 import pydicom
-from pydicom.datadict import tag_for_keyword
+
+from anon_checks import IDENTIFYING_KEYWORDS, STUDY_ID_RE, validate_keywords
 
 # Read one file per series directory by default. DICOM series are homogeneous, so this
 # samples ~16k files rather than ~760k on an export this size. --all-files reads the lot.
 IDENTITY_TAGS = ['PatientID', 'PatientName', 'PatientBirthDate', 'PatientSex',
                  'StudyID', 'StudyInstanceUID', 'SOPInstanceUID']
-
-STUDY_ID_RE = re.compile(r'STUDY_\d+$')
 
 _KEYWORDS = []
 
@@ -68,43 +71,19 @@ def parse_args():
                     help='read every file, not one per series directory (much slower)')
     ap.add_argument('--workers', type=int, default=max(1, (os.cpu_count() or 2) - 1))
     ap.add_argument('--out', default=None, help='write the findings as JSON here')
-    ap.add_argument('--anonymiser', default=None,
-                    help='path to DicomAnon.py, for the identifying keyword list')
     return ap.parse_args()
 
 
-def load_identifying_keywords(path):
-    """Read IDENTIFYING_KEYWORDS out of DicomAnon.py without importing it.
+def load_identifying_keywords():
+    """The tags the anonymiser blanks, split into ones that work and ones that cannot.
 
-    Importing would pull in PyQt6, which the hospital machine running this check has no
-    reason to have. Parsing the source keeps the list identical to what the tool blanks,
-    so this check cannot quietly fall behind a change to the tool.
-
-    Returns (valid, invalid). An entry that is not a DICOM keyword can never satisfy
-    anonymise_dicom's `if kw in ds`, so it blanks nothing and the tag it was meant to
-    cover survives in every file. Those are reported, not silently dropped.
+    Comes straight from anon_checks.py, which is what DicomAnon blanks from, so the
+    check cannot fall behind the tool. An entry that is not a DICOM keyword can never
+    satisfy anonymise_dicom's `if kw in ds`, so it blanks nothing and the tag it was
+    meant to cover survives in every file. Those are reported, not silently dropped.
     """
-    if path is None:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'DicomAnon.py')
-    try:
-        with open(path) as f:
-            tree = ast.parse(f.read())
-    except OSError:
-        print('warning: could not read {}, skipping the identifying-tag check'.format(path))
-        return [], []
-    keywords = None
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-                isinstance(t, ast.Name) and t.id == 'IDENTIFYING_KEYWORDS'
-                for t in node.targets):
-            keywords = sorted(ast.literal_eval(node.value))
-    if keywords is None:
-        print('warning: no IDENTIFYING_KEYWORDS in {}, skipping the identifying-tag check'
-              .format(path))
-        return [], []
-    valid = [k for k in keywords if tag_for_keyword(k) is not None]
-    invalid = [k for k in keywords if tag_for_keyword(k) is None]
-    return valid, invalid
+    invalid = validate_keywords()
+    return sorted(set(IDENTIFYING_KEYWORDS) - set(invalid)), invalid
 
 
 def find_files(destination, patients, all_files):
@@ -333,7 +312,7 @@ def main():
     args = parse_args()
     if not os.path.isdir(args.destination):
         raise SystemExit('not a directory: {}'.format(args.destination))
-    keywords, invalid_keywords = load_identifying_keywords(args.anonymiser)
+    keywords, invalid_keywords = load_identifying_keywords()
     records = scan(args.destination, args.patients, args.all_files,
                    args.workers, keywords)
     if not records:

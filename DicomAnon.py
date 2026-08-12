@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from pydicom.dataset import Dataset
 from pydicom.uid import generate_uid
 from pydicom.multival import MultiValue
+from anon_checks import (IDENTIFYING_KEYWORDS, RunVerifier, VerificationError,
+                         snapshot_source, validate_keywords, verify_file)
 
 
 StyleSheet = '''
@@ -27,67 +29,8 @@ StyleSheet = '''
 '''
 
 
-# Identifying attributes to blank/remove (excluding PatientName/PatientID)
-IDENTIFYING_KEYWORDS = {
-    # Patient (except PatientName, PatientID)
-    "OtherPatientIDs",
-    "OtherPatientNames",
-    "PatientBirthName",
-    "PatientMotherBirthName",
-    "PatientAddress",
-    "PatientTelephoneNumbers",
-    "PatientInsurancePlanCodeSequence",
-    "PatientComments",
-    "EthnicGroup",
-    "Occupation",
-    "AdditionalPatientHistory",
-    "PatientReligiousPreference",
-
-    # General person/organization
-    "ResponsiblePerson",
-    "ResponsiblePersonRole",
-    "PersonName",
-    "PerformingPhysicianName",
-    "ReferringPhysicianName",
-    "ReferringPhysicianAddress",
-    "ReferringPhysicianTelephoneNumbers",
-    "RequestingPhysician",
-    "OperatorsName",
-    "PhysiciansOfRecord",
-    "PhysiciansReadingStudy",
-
-    # Institution / contact info
-    "InstitutionName",
-    "InstitutionAddress",
-    "InstitutionalDepartmentName",
-    "StationName",
-    "DeviceSerialNumber",
-    "SoftwareVersions",
-
-    # Study / scheduling / admin IDs
-    "AccessionNumber",
-    "IssuerOfPatientID",
-    "IssuerOfAccessionNumberSequence",
-    "RequestingService",
-    "AdmissionID",
-    "PatientAccountNumber",
-    "InsurancePlanIdentification",
-    "VisitComments",
-    "ScheduledProcedureStepDescription",
-    "RequestedProcedureDescription",
-    "RequestedProcedureID",
-    "RequestedProcedureLocation",
-
-    # Free-text descriptions
-    "ProtocolName",
-    "PerformedProcedureStepDescription",
-    "StudyComments",
-
-    # Addresses / geographic
-    "CountryOfResidence",
-    "RegionOfResidence",
-    "PatientMotherBirthName",
-}
+# IDENTIFYING_KEYWORDS now lives in anon_checks.py, imported above, so that the
+# anonymiser and the checks that verify it can never disagree about the list.
 
 class DicomAnonWidget(QWidget):
     def __init__(self):
@@ -97,6 +40,7 @@ class DicomAnonWidget(QWidget):
         self.source_dir = ""
         self.destination_dir = ""
         self.lookup_file = ""
+        self.verifier = RunVerifier()
 
         BROWSE_WIDTH = 100
 
@@ -331,6 +275,84 @@ class DicomAnonWidget(QWidget):
         msg.setWindowTitle("Error")
         msg.exec()
 
+    def _verification_report_path(self):
+        """Beside the mapping file, never inside the destination.
+
+        The report names source patient IDs, so it is re-identifying and must not end
+        up in the folder that gets copied to the university.
+        """
+        return '{}dicom-anon-verification.txt'.format(expanduser('~') + os.sep)
+
+    def _report_verification_warnings(self):
+        """Findings that do not justify stopping a finished run, but must be seen.
+
+        A folder whose birth years or sexes disagree while its source PatientID stayed
+        constant is a source data problem, not contamination, so the run is allowed to
+        finish. It still has to be reported: it is the same signal the university end
+        has to rely on, and if it fires while the source ID check stayed quiet, one of
+        the two is wrong and that is worth knowing.
+        """
+        dodgy = list(validate_keywords())
+        problems = self.verifier.problems()
+        if not problems and not dodgy:
+            return
+        lines = []
+        if problems:
+            lines.append('Checks that did not pass:')
+            lines.extend('  - ' + p for p in problems)
+        if dodgy:
+            lines.append('')
+            lines.append('These entries are not DICOM keywords, so they blanked nothing:')
+            lines.extend('  - ' + kw for kw in dodgy)
+        detail = '\n'.join(lines)
+        report_path = self._verification_report_path()
+        try:
+            with open(report_path, 'w') as f:
+                f.write('DicomAnon verification warnings at {}\n\n{}\n'.format(
+                    datetime.now().strftime('%Y-%m-%d %H:%M:%S'), detail))
+            saved = os.path.normpath(report_path)
+        except Exception:
+            saved = None
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setWindowTitle('Check the Output Before Sharing It')
+        msg.setText('Processing finished, but some checks did not pass.')
+        msg.setInformativeText('{}{}'.format(
+            detail,
+            '\n\nSaved to:\n{}'.format(saved) if saved else ''))
+        msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        msg.exec()
+
+    def _report_verification_failure(self, detail):
+        """Stop the run and tell the operator something they can forward verbatim.
+
+        The person running this did not write it and cannot read a traceback, so the
+        dialog has to name the folder and the problem in words, and the report file
+        has to be somewhere they can find and attach.
+        """
+        report_path = self._verification_report_path()
+        stamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        body = 'DicomAnon verification failure at {}\n\n{}\n'.format(stamp, detail)
+        try:
+            with open(report_path, 'w') as f:
+                f.write(body)
+            saved = os.path.normpath(report_path)
+        except Exception:
+            saved = None
+        self.status_label.setText('Stopped: verification failed.')
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Icon.Critical)
+        msg.setWindowTitle('Anonymisation Stopped')
+        msg.setText('Anonymisation was stopped because a check failed.')
+        msg.setInformativeText(
+            '{}\n\nThe files written before this point are still in the output folder, '
+            'but the output is incomplete and should not be copied anywhere until this '
+            'is resolved.{}'.format(
+                detail,
+                '\n\nThis message was also saved to:\n{}'.format(saved) if saved else ''))
+        msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        msg.exec()
+
     # process all DICOMs under the selected top-level folder containing patient folders
     def process_folder(self, source_base_dir, destination_base_dir, mapping_df, lookup_dict):
         # update the status bar
@@ -389,7 +411,28 @@ class DicomAnonWidget(QWidget):
                         print(e)
                         invalid_file_count += 1
                     else:
+                        # capture the source identifiers before anonymise_dicom destroys
+                        # them; nothing downstream of here can recover them
+                        source = snapshot_source(ds)
                         ds = self.anonymise_dicom(ds=ds, anon_name=anon_patient_folder_name, uid_map=uid_map, study_label_map=study_label_map)
+                        problems = verify_file(ds, source, anon_patient_folder_name)
+                        if problems:
+                            raise VerificationError(
+                                'Anonymisation failed its own checks and the run was '
+                                'stopped before this file was written.\n\n'
+                                'Source file:\n{}\n\nProblems:\n{}'.format(
+                                    source_file, '\n'.join('  - ' + p for p in problems)))
+                        # the source PatientID is what makes this a real contamination
+                        # check rather than the birth year proxy the university is stuck with
+                        contamination = self.verifier.record(
+                            source['patient_id'], anon_patient_folder_name,
+                            source['birth_year'], source['sex'])
+                        if contamination:
+                            raise VerificationError(
+                                'Patient data would be mixed up, and the run was stopped '
+                                'before this file was written.\n\n'
+                                'Source file:\n{}\n\nProblem:\n  - {}'.format(
+                                    source_file, contamination))
                         # create the anon folder if it doesn't exist
                         target_dir = os.path.dirname(anon_patient_file)  # create the missing directories all the way to the DICOM file
                         if not os.path.exists(target_dir):
@@ -459,8 +502,17 @@ class DicomAnonWidget(QWidget):
             mapping_df = None
         # process UI events
         QApplication.processEvents()
-        # process the DICOMs within
-        mapping_df, not_found_patients = self.process_folder(self.source_dir, self.destination_dir, mapping_df, lookup_dict)
+        # verify as we go, and stop the run rather than write suspect data (defect 5)
+        self.verifier = RunVerifier()
+        try:
+            mapping_df, not_found_patients = self.process_folder(self.source_dir, self.destination_dir, mapping_df, lookup_dict)
+        except VerificationError as e:
+            self._report_verification_failure(str(e))
+            self.source_button.setEnabled(True)
+            self.destination_button.setEnabled(True)
+            self.lookup_button.setEnabled(True)
+            self.anon_button.setEnabled(True)
+            return
         # process UI events
         QApplication.processEvents()
         # update the status bar
@@ -478,6 +530,8 @@ class DicomAnonWidget(QWidget):
         self.anon_button.setEnabled(True)
         # update the status bar
         self.status_label.setText('Finished processing.')
+        # report the checks that warn rather than stop the run
+        self._report_verification_warnings()
         # report patients not found in the lookup
         if not_found_patients:
             patient_list = '\n'.join(f'  - {pid}' for pid in not_found_patients)
@@ -564,6 +618,18 @@ def self_test(report_path=None):
         ok = False
     else:
         record('OK: Qt libraries match the PyQt6 bindings')
+
+    # Every entry in IDENTIFYING_KEYWORDS must be a real DICOM keyword, or it blanks
+    # nothing and the tag ships in every file. Checked here because CI runs --self-test
+    # on every build, so a typo fails the build rather than the next export (defect 7).
+    dodgy = validate_keywords()
+    if dodgy:
+        record('FAIL: not DICOM keywords, so they blank nothing: {}'.format(
+            ', '.join(dodgy)))
+        ok = False
+    else:
+        record('OK: all {} identifying keywords are real DICOM tags'.format(
+            len(IDENTIFYING_KEYWORDS)))
 
     # Build the real widget offscreen so the check covers QtWidgets and QtGui,
     # not just the QtCore import that fails first.

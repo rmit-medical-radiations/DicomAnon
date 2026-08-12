@@ -39,7 +39,7 @@ The DICOM files are anonymised by blanking the values of the following DICOM tag
 * RequestingPhysician
 * OperatorsName
 * PhysiciansOfRecord
-* PhysiciansReadingStudy
+* NameOfPhysiciansReadingStudy
 
 ### Institution / contact info
 * InstitutionName
@@ -55,7 +55,6 @@ The DICOM files are anonymised by blanking the values of the following DICOM tag
 * IssuerOfAccessionNumberSequence
 * RequestingService
 * AdmissionID
-* PatientAccountNumber
 * InsurancePlanIdentification
 * VisitComments
 * ScheduledProcedureStepDescription
@@ -81,6 +80,21 @@ Further, it recursively remaps all UIDs in the dataset (and sequences), except S
 On completion, DicomAnon will save a mapping of the true patient IDs to anonymised patient IDs as an Excel spreadsheet named `dicom-anon-mapping.xlsx` in your home folder. DicomAnon shows the full path in a dialog when it finishes - see [Where to find the ID mapping spreadsheet](#where-to-find-the-id-mapping-spreadsheet) below.
 
 Note that adding new patient folders (and updates to existing patient folders) will not erase previous DICOM files for the same patient; the new anonymised DICOM files will be saved in the same structure alongside those previously processed. The new patient IDs will also be added to the Excel mapping spreadsheet.
+
+## Checks that can stop a run
+DicomAnon checks every file it anonymises before writing it, and stops the whole run if a check fails rather than carrying on and producing output nobody can trust. A dialog names the source file and what was wrong, and the same text is saved to `dicom-anon-verification.txt` in your home folder so you can send it on.
+
+A run stops if:
+
+* a file still carries an identifying tag, a real birth date, a raw `StudyID`, a source UID, or a private tag after anonymisation;
+* a file's `PatientName` or `PatientID` does not match the anonymised folder it is going into;
+* **an output folder would receive files from two different source patients**, or one source patient would be written to two different output folders. This is the check that catches a source patient folder containing somebody else's study, which anonymisation would otherwise relabel and make undetectable.
+
+If a run stops, the files written before that point are still in the output folder, but the output is incomplete and should not be copied anywhere until the cause is fixed.
+
+Some findings only warn, because they do not justify discarding a finished run: for example an output folder holding more than one birth year or sex while the source patient ID stayed the same, which points at a data entry problem in the source rather than mixed-up patients.
+
+The `check-anon-output.py` script in this repository re-checks a finished output folder from the outside. It is a weaker check than the one built into the app, because by then the source patient IDs are gone, but it is useful for verifying an export that was produced by an older version of DicomAnon.
 
 ## Installation
 Downloads for both Windows and macOS are attached to each release on the [Releases](https://github.com/rmit-medical-radiations/DicomAnon/releases) page. Open the most recent release and download the file for your platform.
