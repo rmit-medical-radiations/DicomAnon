@@ -4,3 +4,6 @@ dist
 .DS_Store
 .DS_Store
 __pycache__/
+
+# scratch output from running tests locally
+tests/__pycache__/

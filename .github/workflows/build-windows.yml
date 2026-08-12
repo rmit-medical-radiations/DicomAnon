@@ -32,6 +32,12 @@ jobs:
       - name: Self-test the dependencies
         run: python DicomAnon.py --self-test
 
+      # The anonymisation checks themselves: contamination, date shifting, the lookup
+      # file, and UID stability across runs. Runs before the build, because a broken
+      # check is worse than a broken build - it ships output nobody verifies.
+      - name: Run the anonymisation tests
+        run: python tests/run_all.py
+
       - name: Build with PyInstaller
         run: pyinstaller DicomAnon-Windows.spec
 
