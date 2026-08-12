@@ -22,6 +22,12 @@ below. In severity order:
 
 Fix 5 first: it is cheap, and it would have caught 1 on the first file.
 
+Adding studies to a patient already in the destination is the normal workflow for this
+data, so incremental support should be made correct rather than removed. See "how to
+support incremental updates safely" below; rule 1 there, an immutable
+patient-to-folder assignment, would on its own have prevented the incident that
+surfaced all of this.
+
 **2026-08-05: v0.7 released.** Fixes the CI blind spot that let broken Windows
 builds ship.
 
@@ -146,6 +152,74 @@ After writing each file, assert:
 
 Fail the run loudly. That last assertion alone would have caught defect 1 on the first
 file processed.
+
+### 2026-08-12: how to support incremental updates safely
+
+Adding new studies to a patient already in the destination is the **normal** case, not
+an edge case: MR-Linac patients accrue around twenty sessions over several weeks, so
+"re-run everything from scratch" is fine as a one-off remediation and unsustainable as a
+workflow. The defects above are not an argument for removing incremental support, they
+are an argument for making it correct. Five rules do that.
+
+#### 1. The patient-to-folder assignment is immutable
+
+Once a hospital ID has been assigned an anon folder, that mapping is **permanent**. The
+input lookup may only ADD patients; if it disagrees with a previously recorded
+assignment, **fail the run and report it** rather than honouring the new value.
+
+This single rule would have prevented the entire incident. Everything else that went
+wrong needed the assignment to drift first.
+
+#### 2. State is persisted, and the run refuses to start without it
+
+Per patient, keep at minimum:
+
+- `uid_map`: source UID to pseudonym, so a later study that references an earlier one
+  still resolves. Structure sets reference series UIDs and registrations match frame of
+  reference UIDs, so a fresh map silently severs those links.
+- `study_label_map`, so `STUDY_nnnn` numbering continues rather than restarting.
+- the assignment from rule 1.
+- the tool version last used for that patient.
+
+Scope `uid_map` **per patient**, which also fixes the cross-patient pseudonym sharing
+noted above. Two patients must never share a pseudonymised UID.
+
+Take the state path as an explicit argument and **exit non-zero if it is missing**. A run
+that silently starts with an empty map is the failure mode that produced duplicates
+nothing could detect.
+
+**The state file is the re-identification key**: it holds hospital IDs and original
+UIDs. Keep it OUTSIDE the destination that gets transferred, and never inside a folder
+anyone might copy to a collaborator. Do not put it in the operator's home folder either
+if that risks it drifting out of sync with a destination; tie it to the destination
+explicitly.
+
+#### 3. Writing a file is idempotent
+
+Output paths already mirror the source relative path, so re-processing the same source
+file overwrites rather than duplicating. Keep that property. Never disambiguate a
+collision by appending a counter: a collision means either the same file arriving twice,
+which should overwrite, or two different patients colliding, which should fail.
+
+#### 4. A version change forces reprocessing, and is never silently mixed
+
+Compare the recorded tool version for a patient against the current one. If it is older,
+either reprocess that patient's entire folder from source, or refuse and list the stale
+patients. Never write new files at the current version alongside old files at an earlier
+one: that is exactly how a third of the export kept its 2025-era state.
+
+If the source is no longer available for a stale patient, that folder cannot be brought
+up to date. Mark it permanently stale in the state file so it is visible rather than
+assumed current.
+
+#### 5. Verify after every run
+
+The per-file assertions listed above, plus two that only matter for incremental use:
+
+- no two anon folders contain data from the same source patient;
+- every file present in the destination is recorded in the state file. An unrecorded
+  file is orphaned output from a previous configuration, which is precisely what the
+  duplicated copies were.
 
 ### 2026-08-05: releases v0.4 and v0.5 shipped a broken Windows EXE
 
