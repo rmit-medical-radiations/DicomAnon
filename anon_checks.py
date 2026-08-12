@@ -22,11 +22,24 @@ defect 7: an entry that is not a real DICOM keyword can never satisfy `if kw in 
 it blanks nothing and the tag survives in every file ever written.
 """
 import collections
+import datetime
 import re
+import secrets
 
 from pydicom.datadict import tag_for_keyword
 
 STUDY_ID_RE = re.compile(r'STUDY_\d+$')
+
+# Walk these by VR rather than by keyword, for the same reason the UID remapping walks
+# by VR: a keyword list silently misses whatever nobody thought of, and defect 1 is what
+# that looks like after a year in production.
+DATE_VRS = ('DA', 'TM', 'DT')
+
+# A date or a full timestamp embedded in free text, e.g. the SeriesDescription
+# '20210819134732-1ABrain'. Both widths are needed: matching only 8 digits misses the
+# timestamp entirely, because the date part is followed by more digits.
+EMBEDDED_DATE_RE = re.compile(r'(?<!\d)(\d{14}|\d{8})(?!\d)')
+TEXT_VRS = ('SH', 'LO', 'ST', 'LT', 'UT', 'UC')
 
 # Identifying attributes to blank/remove (excluding PatientName/PatientID)
 IDENTIFYING_KEYWORDS = {
@@ -105,24 +118,225 @@ def validate_keywords(keywords=None):
     return sorted(k for k in keywords if tag_for_keyword(k) is None)
 
 
+def new_offsets():
+    """A fresh (days, seconds) offset for one patient.
+
+    Random, and stored in the ID mapping file rather than compiled in, because the old
+    behaviour shifted StudyDate by a hard-coded 30 days in a public repository. Anyone
+    could read the constant and undo the shift, which made the shift decorative.
+
+    Per patient, not per run: two patients sharing an offset lets their timelines be
+    lined up against each other. Because it is stored, a later run for the same patient
+    reuses it, so the oncologist's added studies keep their true spacing from the
+    earlier ones.
+
+    Shifted backwards by one to ten years, so no study lands in the future.
+    """
+    return -(365 + secrets.randbelow(3285)), secrets.randbelow(86400)
+
+
+def shift_da(value, offset_days):
+    """YYYYMMDD, shifted. Empty if it will not parse, since a date we cannot shift is a
+    date we cannot leave in place either."""
+    text = str(value).strip()
+    if not text:
+        return value
+    try:
+        shifted = (datetime.datetime.strptime(text[:8], '%Y%m%d').date()
+                   + datetime.timedelta(days=offset_days))
+    except ValueError:
+        return ''
+    return shifted.strftime('%Y%m%d')
+
+
+def shift_tm(value, offset_seconds):
+    """HHMMSS[.ffffff], shifted within the day, fractional seconds preserved.
+
+    Wrapping past midnight without touching the accompanying date is a known
+    imprecision: DA and TM are separate elements and pairing them reliably is not
+    possible. The offset is constant, so intervals between two times survive except
+    across the single wrap point, which is what the longitudinal analysis needs.
+    """
+    text = str(value).strip()
+    if not text:
+        return value
+    head, _, frac = text.partition('.')
+    if not head.isdigit() or len(head) not in (2, 4, 6):
+        return ''
+    head = head.ljust(6, '0')
+    try:
+        seconds = (int(head[0:2]) * 3600 + int(head[2:4]) * 60 + int(head[4:6])
+                   + offset_seconds) % 86400
+    except ValueError:
+        return ''
+    shifted = '{:02d}{:02d}{:02d}'.format(
+        seconds // 3600, (seconds % 3600) // 60, seconds % 60)
+    return '{}.{}'.format(shifted, frac) if frac else shifted
+
+
+def shift_dt(value, offset_days, offset_seconds):
+    """YYYYMMDDHHMMSS[.ffffff][&ZZXX], shifted. Timezone suffix preserved."""
+    text = str(value).strip()
+    if not text:
+        return value
+    zone = ''
+    for sign in ('+', '-'):
+        idx = text.find(sign, 8)
+        if idx != -1:
+            text, zone = text[:idx], text[idx:]
+            break
+    body, _, frac = text.partition('.')
+    if len(body) < 8 or not body.isdigit():
+        return ''
+    body = body.ljust(14, '0')
+    try:
+        moment = (datetime.datetime.strptime(body, '%Y%m%d%H%M%S')
+                  + datetime.timedelta(days=offset_days, seconds=offset_seconds))
+    except ValueError:
+        return ''
+    out = moment.strftime('%Y%m%d%H%M%S')
+    if frac:
+        out = '{}.{}'.format(out, frac)
+    return out + zone
+
+
+def shift_text_dates(text, offset_days, offset_seconds=0):
+    """Shift a date or timestamp embedded in free text.
+
+    SeriesDescription carried a full timestamp on 2% of the series in the export, e.g.
+    '20210819134732-1ABrain'. Shifting it keeps the description readable and keeps its
+    ordering, while removing the lookup key. Only runs that parse as a real date are
+    touched, so an eight digit accession number is left alone.
+    """
+    def replace(match):
+        run = match.group(1)
+        if len(run) == 14:
+            return shift_dt(run, offset_days, offset_seconds) or run
+        return shift_da(run, offset_days) or run
+
+    return EMBEDDED_DATE_RE.sub(replace, str(text))
+
+
+def shift_moment(date_text, time_text, offset_days, offset_seconds):
+    """Shift a (DA, TM) pair as one instant. Returns (date, time), or None if unparsable.
+
+    DICOM splits an instant across two elements, so shifting them separately puts them a
+    day out of step whenever the time offset carries past midnight: StudyDate would land
+    on the 3rd while AcquisitionDateTime, a DT holding the same instant, landed on the
+    4th. Pairs are shifted together to keep a file agreeing with itself.
+    """
+    date_text, time_text = str(date_text).strip(), str(time_text).strip()
+    head, _, frac = time_text.partition('.')
+    if not head.isdigit() or len(head) not in (2, 4, 6):
+        return None
+    head = head.ljust(6, '0')
+    try:
+        moment = (datetime.datetime.strptime(
+            '{}{}'.format(date_text[:8], head), '%Y%m%d%H%M%S')
+            + datetime.timedelta(days=offset_days, seconds=offset_seconds))
+    except ValueError:
+        return None
+    shifted_time = moment.strftime('%H%M%S')
+    return (moment.strftime('%Y%m%d'),
+            '{}.{}'.format(shifted_time, frac) if frac else shifted_time)
+
+
+def _pair_keyword(keyword):
+    """The TM element that partners a DA element, by name.
+
+    Derived rather than listed, so StructureSetDate/StructureSetTime and
+    DateOfLastCalibration/TimeOfLastCalibration both work without anybody enumerating
+    them. Same reasoning as walking by VR: a list only covers what was thought of.
+    """
+    return keyword.replace('Date', 'Time') if 'Date' in keyword else None
+
+
+def shift_dates(ds, offset_days, offset_seconds):
+    """Shift every DA, TM and DT element in the dataset and its sequences (defect 1).
+
+    Walks by VR deliberately. The previous behaviour shifted StudyDate alone, which was
+    worse than shifting nothing: SeriesDate sat beside it unshifted, so differencing the
+    two recovered the offset and undid it everywhere. Either shift the whole timeline or
+    do not pretend to.
+    """
+    by_keyword = {}
+    for elem in ds:
+        if elem.VR in DATE_VRS and elem.keyword:
+            by_keyword[elem.keyword] = elem
+
+    handled = set()
+    for keyword, elem in by_keyword.items():
+        if elem.VR != 'DA' or id(elem) in handled:
+            continue
+        partner = by_keyword.get(_pair_keyword(keyword) or '')
+        if partner is None or partner.VR != 'TM':
+            continue
+        dates, times = _values(elem), _values(partner)
+        if len(dates) != 1 or len(times) != 1 or not str(dates[0]).strip():
+            continue
+        shifted = shift_moment(dates[0], times[0], offset_days, offset_seconds)
+        if shifted is None:
+            continue
+        elem.value, partner.value = shifted
+        handled.update((id(elem), id(partner)))
+
+    for elem in ds:
+        if elem.VR == 'SQ':
+            for item in elem.value or []:
+                shift_dates(item, offset_days, offset_seconds)
+            continue
+        if id(elem) in handled:
+            continue
+        values = _values(elem)
+        if not values:
+            continue
+        if elem.VR == 'DA':
+            shifted = [shift_da(v, offset_days) for v in values]
+        elif elem.VR == 'TM':
+            shifted = [shift_tm(v, offset_seconds) for v in values]
+        elif elem.VR == 'DT':
+            shifted = [shift_dt(v, offset_days, offset_seconds) for v in values]
+        elif elem.VR in TEXT_VRS:
+            shifted = [shift_text_dates(v, offset_days, offset_seconds)
+                       if isinstance(v, str) else v for v in values]
+            if shifted == values:
+                continue
+        else:
+            continue
+        elem.value = shifted if len(shifted) > 1 else shifted[0]
+
+
+def _values(elem):
+    """Element values as a list, whether it is single or multi-valued."""
+    value = elem.value
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)) or type(value).__name__ == 'MultiValue':
+        return list(value)
+    return [value]
+
+
 def snapshot_source(ds):
     """Capture what verify_file needs to compare against, before ds is mutated.
 
     Must be called BEFORE anonymise_dicom, which overwrites all of it.
+
+    Dates are keyed by tag and collected into a set, rather than compared positionally,
+    because anonymise_dicom changes the shape of the dataset as well as its values:
+    remove_private_tags() deletes elements and blanking an SQ empties its items, so the
+    nth element on the way out is not the nth element on the way in.
     """
     uids = set()
+    dates = collections.defaultdict(set)
     for elem in ds.iterall():
         if elem.VR == 'UI' and not (elem.keyword or '').endswith('SOPClassUID'):
-            value = elem.value
-            if value is None:
-                continue
-            if isinstance(value, (list, tuple)) or type(value).__name__ == 'MultiValue':
-                uids.update(str(v) for v in value if v)
-            elif str(value):
-                uids.add(str(value))
+            uids.update(str(v) for v in _values(elem) if v)
+        elif elem.VR in DATE_VRS:
+            dates[str(elem.tag)].update(str(v) for v in _values(elem) if str(v).strip())
     birth = str(getattr(ds, 'PatientBirthDate', '') or '')
     return {
         'uids': uids,
+        'dates': {k: v for k, v in dates.items()},
         'patient_id': str(getattr(ds, 'PatientID', '') or ''),
         'patient_name': str(getattr(ds, 'PatientName', '') or ''),
         'birth_year': birth[:4],
@@ -130,15 +344,12 @@ def snapshot_source(ds):
     }
 
 
-def verify_file(ds, snapshot, anon_name, check_dates=False):
+def verify_file(ds, snapshot, anon_name, check_dates=True):
     """Problems with one anonymised dataset. Empty list means it passed.
 
-    This is CLAUDE.md defect 5's assertion list, minus the date and time one.
-
-    check_dates stays False until defect 1 is fixed. Turning it on today fails on the
-    first file of every run, correctly: StudyTime, SeriesDate, AcquisitionDate and the
-    rest are still written out untouched. That is a real defect, not a broken assertion,
-    but the switch is here so fixing defect 1 is what enables it rather than a rewrite.
+    This is CLAUDE.md defect 5's assertion list in full, including the date and time
+    one, which is on now that defect 1 is fixed. It is the assertion that would have
+    caught defect 1 on the first file processed, so it stays on.
     """
     problems = []
 
@@ -185,21 +396,142 @@ def verify_file(ds, snapshot, anon_name, check_dates=False):
 
 
 def _verify_dates(ds, snapshot):
-    """Every DA/TM/DT element must differ from its source value (defect 1).
+    """No DA, TM or DT element may still hold a value it had in the source (defect 1).
 
-    Not reachable until defect 1 is fixed and snapshot carries the source dates. Kept
-    adjacent to the switch that enables it so the two cannot drift apart.
+    Compares against the set of values that tag held in the source, not against a
+    positional twin, because anonymise_dicom changes the dataset's shape. A value that
+    was not there before is fine even if some other element once held it; what matters
+    is that nothing survived where it was.
     """
     originals = snapshot.get('dates')
     if originals is None:
-        return ['date verification is on but the snapshot has no dates; fix defect 1']
+        return ['date verification is on but the snapshot captured no dates']
     problems = []
     for elem in ds.iterall():
-        if elem.VR in ('DA', 'TM', 'DT') and elem.value:
-            key = str(elem.tag)
-            if key in originals and str(elem.value) == originals[key]:
-                problems.append('{} is unchanged from the source'.format(
-                    elem.keyword or elem.tag))
+        if elem.VR not in DATE_VRS:
+            continue
+        was = originals.get(str(elem.tag))
+        if not was:
+            continue
+        for value in _values(elem):
+            text = str(value).strip()
+            if text and text in was:
+                problems.append('{} still holds the source value {}'.format(
+                    elem.keyword or elem.tag, text))
+                break
+    return problems
+
+
+# Anon IDs become folder names, so they have to survive being one on Windows too.
+UNSAFE_FOLDER_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+RESERVED_WINDOWS_NAMES = {
+    'CON', 'PRN', 'AUX', 'NUL',
+    *('COM{}'.format(i) for i in range(1, 10)),
+    *('LPT{}'.format(i) for i in range(1, 10)),
+}
+
+
+def check_lookup(pairs):
+    """Problems with the ID lookup file, as (hospital id, anon id) pairs in file order.
+
+    The lookup is where the oncologist decides which anon folder a patient gets, and it
+    is the single most dangerous input the tool takes. Two hospital IDs sharing one anon
+    ID puts two people in one folder. A hospital ID listed twice silently kept the last
+    row, because the loader was dict(zip(...)). Neither was detected, and both are how
+    the recorded incident could start.
+
+    Returns a list of problems. Anything returned should stop the run: there is no
+    partially valid lookup file worth processing.
+    """
+    problems = []
+    seen_hospital = collections.defaultdict(list)
+    seen_anon = collections.defaultdict(list)
+
+    for row, (hospital_id, anon_id) in enumerate(pairs, start=2):  # row 1 is the header
+        hospital_id = (hospital_id or '').strip()
+        anon_id = (anon_id or '').strip()
+        if not hospital_id and not anon_id:
+            continue
+        if not hospital_id:
+            problems.append('row {}: no patient ID, but an anonymised ID of {!r}'.format(
+                row, anon_id))
+            continue
+        if not anon_id:
+            problems.append('row {}: patient ID {} has no anonymised ID'.format(
+                row, hospital_id))
+            continue
+        if not hospital_id.isdigit():
+            problems.append(
+                'row {}: patient ID {!r} is not a number. Folder names are read as '
+                '<patientID>_<name> with a numeric ID, so this row can never match a '
+                'patient folder'.format(row, hospital_id))
+        elif hospital_id != str(int(hospital_id)):
+            problems.append(
+                'row {}: patient ID {!r} has a leading zero. Folder IDs are compared as '
+                'numbers, so this row and {!r} would be treated as the same patient'
+                .format(row, hospital_id, str(int(hospital_id))))
+        if UNSAFE_FOLDER_RE.search(anon_id) or anon_id in ('.', '..'):
+            problems.append(
+                'row {}: anonymised ID {!r} cannot be used as a folder name'.format(
+                    row, anon_id))
+        if anon_id.split('.')[0].upper() in RESERVED_WINDOWS_NAMES:
+            problems.append(
+                'row {}: anonymised ID {!r} is a reserved name on Windows'.format(
+                    row, anon_id))
+        if anon_id != anon_id.strip() or anon_id.endswith('.'):
+            problems.append(
+                'row {}: anonymised ID {!r} starts or ends with a space or a dot, which '
+                'Windows silently strips from folder names'.format(row, anon_id))
+        seen_hospital[hospital_id].append(row)
+        seen_anon[anon_id].append(row)
+
+    for hospital_id, rows in sorted(seen_hospital.items()):
+        if len(rows) > 1:
+            problems.append(
+                'patient ID {} appears on rows {}. Only one of them would be used and '
+                'the others silently ignored'.format(
+                    hospital_id, ', '.join(str(r) for r in rows)))
+    for anon_id, rows in sorted(seen_anon.items()):
+        if len(rows) > 1:
+            problems.append(
+                'anonymised ID {!r} is given to more than one patient, on rows {}. '
+                'Their studies would all be written into the same folder and given the '
+                'same identity'.format(anon_id, ', '.join(str(r) for r in rows)))
+
+    if not seen_hospital:
+        problems.append('the lookup file has no usable rows')
+    return problems
+
+
+def check_assignments(lookup, recorded):
+    """Rule 1: a patient's anon folder, once assigned, is permanent.
+
+    lookup and recorded are both {hospital id: anon folder}. The lookup file may only
+    ADD patients. If it disagrees with an assignment already recorded in the ID mapping
+    file, that is the failure that started the whole incident: the patient gets written
+    to a second folder, the first copy stays where it is, and nothing links them.
+
+    Honouring the new value is never right, so this returns problems rather than a
+    reconciliation.
+    """
+    problems = []
+    for hospital_id, folder in sorted(recorded.items()):
+        current = lookup.get(hospital_id)
+        if current is not None and current != folder:
+            problems.append(
+                'patient {} was previously anonymised into folder {!r}, but the lookup '
+                'file now says {!r}. The earlier folder cannot be unwritten, so this '
+                'would split one patient across two identities'.format(
+                    hospital_id, folder, current))
+    claimed = {}
+    for hospital_id, folder in sorted(recorded.items()):
+        claimed.setdefault(folder, hospital_id)
+    for hospital_id, folder in sorted(lookup.items()):
+        owner = claimed.get(folder)
+        if owner is not None and owner != hospital_id:
+            problems.append(
+                'the lookup file gives folder {!r} to patient {}, but that folder '
+                'already holds patient {}'.format(folder, hospital_id, owner))
     return problems
 
 

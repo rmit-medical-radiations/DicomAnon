@@ -73,7 +73,16 @@ The DICOM files are anonymised by blanking the values of the following DICOM tag
 * PatientMotherBirthName
 
 
-The tag `PatientBirthDate` is modified but the year is preserved. The `StudyDate` tag is shifted by a fixed number of days so that the time period between studies is preserved.
+### Dates and times
+Every date and time in the file is shifted by the same offset: not just `StudyDate`, but `SeriesDate`, `AcquisitionDate`, every `...Time`, every combined date-time, the same tags inside nested sequences, and any date written into a free-text field such as `SeriesDescription`.
+
+The offset is a random number of days and seconds, generated per patient and recorded in the ID mapping spreadsheet. Because it is stored, the same patient gets the same offset every time, so studies added months later keep their true spacing from the earlier ones. Because it is random and per patient, it cannot be guessed from the software and one patient's offset tells you nothing about another's.
+
+The gap between any two studies for a patient is therefore exactly preserved, while the real dates are not recoverable from the files.
+
+`PatientBirthDate` is reduced to 1 January of its year, and that year is the shifted one, not the real one. `PatientAge` is kept: age is the gap between the birth date and the study date, and shifting both by the same offset leaves it correct.
+
+> **Why this changed in v0.8.** Earlier versions shifted `StudyDate` alone, by a fixed 30 days written into the source code. `SeriesDate` sat next to it unshifted, so subtracting one from the other recovered the offset; and the 30 days was public anyway. Every time field, and every date field except `StudyDate`, was written out untouched. Data anonymised by an earlier version does not have this protection.
 
 Further, it recursively remaps all UIDs in the dataset (and sequences), except SOPClassUIDs. The reason for doing this is so that even if the anonymised DICOMs are loaded back into the system at their originating institution, the patient could still not be identified.
 
@@ -138,6 +147,19 @@ The column *names* do not matter - DicomAnon reads the first and second columns 
 
 Any patient folder whose ID is not listed in the lookup file is skipped, and DicomAnon lists those patients in a warning dialog when it finishes. If a run processes fewer patients than you expected, that dialog is the first place to look.
 
+### The lookup file is checked before anything is written
+This file decides which patient goes into which folder, so a mistake in it is the most damaging kind. DicomAnon checks the whole file first and refuses to start if anything is wrong, listing every problem at once so you can fix them in one pass. It rejects:
+
+* the same anonymised ID given to two different patients, which would put two people in one folder under one identity;
+* the same patient ID listed twice, which previously kept whichever row came last, silently;
+* a row missing either ID;
+* a patient ID that is not a number, since it could never match a `<patientID>_<name>` folder;
+* an anonymised ID that will not work as a folder name, including `/` or `\`, a name reserved by Windows such as `CON`, or a trailing space or dot.
+
+It also refuses to start if two source folders have the same patient ID, for example `0123_SmithJohn` and `123_JonesMary`, because both would be written into the same output folder. Note that Excel drops leading zeros from a number, so a padded ID cannot be represented in the lookup file at all.
+
+**A patient's folder assignment is permanent.** Once a patient has been anonymised into a folder, DicomAnon will not accept a lookup file that moves them somewhere else, or that gives their folder to somebody else. The already-written folder cannot be unwritten, so honouring the change would split one patient across two identities with nothing connecting them. If you need to change an assignment, ask before editing anything.
+
 ## Where to find the ID mapping spreadsheet
 The spreadsheet is always called `dicom-anon-mapping.xlsx` and is always saved in your **home folder** - not in the destination folder you chose for the anonymised DICOM files, and not inside Documents. When processing finishes, DicomAnon shows the full path in a dialog; you can select the path with the mouse and copy it.
 
@@ -162,5 +184,18 @@ To open it:
 
 Alternatively, choose **Go > Go to Folder** (<kbd>Shift</kbd> + <kbd>Command</kbd> + <kbd>G</kbd>), type `~/dicom-anon-mapping.xlsx` and press <kbd>Enter</kbd>.
 
+## Never edit the mapping spreadsheet by hand
+The spreadsheet is not a report. DicomAnon reads it as well as writes it, and it opens on a sheet saying so.
+
+As well as the patient IDs, it records the **date offset** used for each patient. That offset is how the same patient's studies keep their true spacing when you add more of them later. Change a row by hand and you can:
+
+* send a patient's new studies into a different folder from their earlier ones, splitting one person into two;
+* shift a patient's new studies by a different amount from their old ones, so the intervals between their sessions become wrong;
+* make it impossible to reproduce or check what was done, because the offsets exist nowhere else.
+
+None of that is detectable afterwards from the anonymised files alone.
+
+DicomAnon keeps the previous version as `dicom-anon-mapping.xlsx.bak` each time it saves. If you think something is wrong with the file, do not correct it: ask first. An assignment that has already been used to write files cannot be changed after the fact.
+
 ## Keep the mapping spreadsheet safe
-The mapping spreadsheet is the only record linking the real patient IDs to the anonymised ones. Anyone with both the anonymised DICOM files and this spreadsheet can re-identify the patients, so store it according to your institution's requirements for identifiable data - not alongside the anonymised files you intend to share.
+The mapping spreadsheet is the only record linking the real patient IDs to the anonymised ones, and the date offsets it holds are part of that key: with them, every shifted date can be turned back into the real one. Anyone with both the anonymised DICOM files and this spreadsheet can re-identify the patients, so store it according to your institution's requirements for identifiable data - not alongside the anonymised files you intend to share, and never copied to whoever receives those files.

@@ -1,16 +1,18 @@
 import sys
 import glob
 import os
+import shutil
 from PyQt6.QtWidgets import QWidget, QPushButton, QProgressBar, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QApplication, QFileDialog, QLabel, QLineEdit, QMessageBox, QSizePolicy
 from PyQt6.QtCore import Qt, QT_VERSION_STR, PYQT_VERSION_STR
 from pydicom import dcmread
 import pandas as pd
 from os.path import expanduser
-from datetime import datetime, timedelta
+from datetime import datetime
 from pydicom.dataset import Dataset
 from pydicom.uid import generate_uid
 from pydicom.multival import MultiValue
 from anon_checks import (IDENTIFYING_KEYWORDS, RunVerifier, VerificationError,
+                         check_assignments, check_lookup, new_offsets, shift_dates,
                          snapshot_source, validate_keywords, verify_file)
 
 
@@ -41,6 +43,7 @@ class DicomAnonWidget(QWidget):
         self.destination_dir = ""
         self.lookup_file = ""
         self.verifier = RunVerifier()
+        self.mapping_file = '{}dicom-anon-mapping.xlsx'.format(expanduser('~') + os.sep)
 
         BROWSE_WIDTH = 100
 
@@ -116,26 +119,18 @@ class DicomAnonWidget(QWidget):
         self.activateWindow()
         self.raise_()
 
-    def _shift_study_date(self, ds: Dataset, offset_days: int) -> None:
-        """
-        Shift StudyDate by a fixed number of days.
-
-        Using the same offset for all studies preserves the exact
-        day differences between any two StudyDates.
-        """
-        s = getattr(ds, "StudyDate", None)
-        if not (s and len(s) == 8):
-            return
-        try:
-            dt = datetime.strptime(s, "%Y%m%d").date()
-            dt_new = dt + timedelta(days=offset_days)
-            ds.StudyDate = dt_new.strftime("%Y%m%d")
-        except Exception:
-            # If parsing fails, leave as-is
-            pass
-
     def _anonymise_birthdate(self, ds: Dataset) -> None:
-        """Replace PatientBirthDate but keep the year."""
+        """Reduce PatientBirthDate to 1 January of its year.
+
+        Runs AFTER shift_dates, so the year is the shifted one, not the real one. That
+        ordering is what lets PatientAge stay in the file: age is the gap between birth
+        date and study date, and shifting both by the same offset leaves that gap
+        correct while making the year itself meaningless.
+
+        Keeping the real year and keeping PatientAge, which is what the tool used to do,
+        would have handed over the offset: age minus (study year - birth year) is the
+        shift in years, and knowing that undoes it everywhere.
+        """
         b = getattr(ds, "PatientBirthDate", None)
         if not (b and len(b) == 8):
             return
@@ -189,27 +184,34 @@ class DicomAnonWidget(QWidget):
         anon_name: str,
         uid_map: dict | None = None,
         study_label_map: dict | None = None,
+        offsets: tuple | None = None,
     ) -> Dataset:
         """
         Anonymise a DICOM dataset in place for hospital→research sharing.
 
         - PatientName, PatientID → anon_name
-        - PatientBirthDate → same year, set to YYYY0101
-        - StudyDate → add 1 month
+        - Every DA, TM and DT element shifted by this patient's offset
+        - PatientBirthDate reduced to 1 January of its (shifted) year
+        - Dates embedded in free text shifted to match
         - Private tags removed
         - Other identifying attributes blanked
         - UIDs pseudonymised consistently using uid_map
         - StudyID pseudonymised using study_label_map
-        - StudyDescription is NOT changed
+        - StudyDescription is NOT changed, apart from any date inside it
         """
         if uid_map is None:
             uid_map = {}
         if study_label_map is None:
             study_label_map = {}
+        if offsets is None:
+            offsets = new_offsets()
 
-        # dates
+        # dates: shift the whole timeline, then blur the birth date within it. Shifting
+        # StudyDate alone was worse than useless, because the unshifted SeriesDate
+        # beside it gave the offset away (defect 1).
+        offset_days, offset_seconds = offsets
+        shift_dates(ds, offset_days, offset_seconds)
         self._anonymise_birthdate(ds)
-        self._shift_study_date(ds, offset_days=30)
 
         # remove private tags
         ds.remove_private_tags()
@@ -245,12 +247,122 @@ class DicomAnonWidget(QWidget):
 
         return ds
 
+    @staticmethod
+    def _cell_to_str(value):
+        """Excel cell to the string the rest of the tool compares against.
+
+        pandas types a column of numbers as float, so a plain .astype(str) turns 1234
+        into '1234.0', which then matches no patient folder and silently skips the
+        patient. One blank cell anywhere in the column is enough to trigger it.
+        """
+        if value is None:
+            return ''
+        if isinstance(value, float):
+            if pd.isna(value):
+                return ''
+            if value.is_integer():
+                return str(int(value))
+        return str(value).strip()
+
     def _load_lookup(self, lookup_file):
-        """Load the ID lookup Excel file. Returns a dict {internal_id_str: anon_id_str}."""
+        """Load and check the ID lookup Excel file.
+
+        Returns {internal_id_str: anon_id_str}. Raises VerificationError listing every
+        problem, rather than the first, so a bad file can be fixed in one pass.
+        """
         df = pd.read_excel(lookup_file)
+        if len(df.columns) < 2:
+            raise VerificationError(
+                'The lookup file needs at least two columns: the real patient ID, then '
+                'the anonymised ID.')
         col_internal = df.columns[0]
         col_anon = df.columns[1]
-        return dict(zip(df[col_internal].astype(str), df[col_anon].astype(str)))
+        pairs = [(self._cell_to_str(a), self._cell_to_str(b))
+                 for a, b in zip(df[col_internal], df[col_anon])]
+        problems = check_lookup(pairs)
+        if problems:
+            raise VerificationError(
+                'The ID lookup file has problems that would corrupt the output:\n\n{}'
+                .format('\n'.join('  - ' + p for p in problems)))
+        return {a: b for a, b in pairs if a and b}
+
+    MAPPING_SHEET = 'mapping'
+    WARNING_SHEET = 'DO NOT EDIT'
+    WARNING_LINES = [
+        'DO NOT EDIT THIS FILE BY HAND.',
+        '',
+        'DicomAnon reads and writes it. It is not a report.',
+        '',
+        'It records which anonymised folder each real patient was given, and the date '
+        'offset used to shift that patient\'s dates. Changing either by hand will split '
+        'one patient across two folders, or shift a patient\'s new studies by a '
+        'different amount from their earlier ones, and nothing will warn you.',
+        '',
+        'Editing the file can also silently break anonymisation for that patient.',
+        '',
+        'This file is the only record linking the real and anonymised IDs, and the date '
+        'offsets are part of that key. Keep it safe, keep it away from the anonymised '
+        'DICOM files, and never copy it to anyone you send those files to.',
+        '',
+        'If something looks wrong here, do not correct it. Ask first: an assignment that '
+        'has already been used to write files cannot be changed after the fact.',
+    ]
+
+    def _read_mapping(self, mapping_file):
+        """Load the ID mapping file, tolerating one written before the warning sheet."""
+        if not os.path.isfile(mapping_file):
+            return None
+        try:
+            return pd.read_excel(mapping_file, sheet_name=self.MAPPING_SHEET, index_col=0)
+        except ValueError:
+            # written by a version that had a single unnamed sheet
+            return pd.read_excel(mapping_file, index_col=0)
+
+    def _save_mapping(self, mapping_df, mapping_file):
+        """Write the mapping with the warning sheet first, so opening it shows that.
+
+        Written to a temporary file and moved into place, keeping the previous version
+        as .bak. This file is now saved after every patient rather than once per run, and
+        it is the only record linking real and anonymised IDs: a crash partway through
+        writing it would destroy something that cannot be reconstructed from anything
+        else, since the date offsets exist nowhere but here.
+        """
+        if mapping_df is None:
+            return
+        tmp = mapping_file + '.tmp.xlsx'  # pandas picks the engine from the extension
+        with pd.ExcelWriter(tmp, engine='openpyxl') as writer:
+            pd.DataFrame({'READ THIS FIRST': self.WARNING_LINES}).to_excel(
+                writer, sheet_name=self.WARNING_SHEET, index=False)
+            mapping_df.to_excel(writer, sheet_name=self.MAPPING_SHEET)
+        if os.path.isfile(mapping_file):
+            try:
+                shutil.copyfile(mapping_file, mapping_file + '.bak')
+            except OSError:
+                pass  # a missing backup must not stop the run from recording the mapping
+        os.replace(tmp, mapping_file)
+
+    def _recorded_assignments(self, mapping_df):
+        """{hospital id: anon folder} already committed to by an earlier run."""
+        if mapping_df is None or 'anon_patient_dir_name' not in mapping_df:
+            return {}
+        return {str(row.patient_id): str(row.anon_patient_dir_name)
+                for row in mapping_df.itertuples()}
+
+    def _patient_offsets(self, mapping_df, patient_id):
+        """This patient's stored date offsets, or a fresh pair if they are new.
+
+        Reused across runs on purpose. The oncologist adds studies to a patient over
+        weeks, and a new offset each run would leave that patient's own timeline
+        inconsistent with itself, which is the thing the shift is supposed to preserve.
+        """
+        if mapping_df is not None and 'date_offset_days' in mapping_df:
+            rows = mapping_df.loc[mapping_df['patient_id'] == patient_id]
+            if len(rows):
+                days = rows.iloc[0]['date_offset_days']
+                seconds = rows.iloc[0].get('time_offset_seconds', 0)
+                if pd.notna(days):
+                    return int(days), int(seconds if pd.notna(seconds) else 0)
+        return new_offsets()
 
     def _is_new_patient(self, patient_id, mapping_df):
         if mapping_df is None:
@@ -373,6 +485,22 @@ class DicomAnonWidget(QWidget):
         not_found_patients = []
         # find the patient directories
         patient_dirs_l = [ name for name in os.listdir(source_base_dir) if os.path.isdir(os.path.join(source_base_dir, name)) ]
+        # Two source folders that parse to the same patient ID would be written into one
+        # anon folder. Excel drops leading zeros, so the lookup file cannot even express
+        # the difference between 0123_X and 123_Y; the collision has to be caught here.
+        by_parsed_id = {}
+        for name in patient_dirs_l:
+            try:
+                by_parsed_id.setdefault(self._parse_patient_id(name), []).append(name)
+            except Exception:
+                continue  # reported per patient in the loop below
+        collisions = {pid: names for pid, names in by_parsed_id.items() if len(names) > 1}
+        if collisions:
+            raise VerificationError(
+                'Different source folders have the same patient ID, so they would be '
+                'written into the same anonymised folder:\n\n{}'.format('\n'.join(
+                    '  - patient ID {} comes from: {}'.format(pid, ', '.join(sorted(names)))
+                    for pid, names in sorted(collisions.items()))))
         if len(patient_dirs_l) == 0:
             self._display_error(f'There are no patient directories under {source_base_dir}')
         else:
@@ -391,6 +519,9 @@ class DicomAnonWidget(QWidget):
                     continue
                 anon_patient_folder_name = lookup_dict[patient_id_str]
                 new_patient = self._is_new_patient(patient_id, mapping_df)
+                # reused for a patient already in the mapping, so studies added later
+                # keep their true spacing from the ones already anonymised
+                offsets = self._patient_offsets(mapping_df, patient_id)
                 anon_patient_dir = destination_base_dir + os.sep + anon_patient_folder_name
                 patient_full_dir = source_base_dir + os.sep + patient_dir
                 dicom_files = glob.glob('{}/**/*.dcm'.format(patient_full_dir), recursive=True)
@@ -414,7 +545,7 @@ class DicomAnonWidget(QWidget):
                         # capture the source identifiers before anonymise_dicom destroys
                         # them; nothing downstream of here can recover them
                         source = snapshot_source(ds)
-                        ds = self.anonymise_dicom(ds=ds, anon_name=anon_patient_folder_name, uid_map=uid_map, study_label_map=study_label_map)
+                        ds = self.anonymise_dicom(ds=ds, anon_name=anon_patient_folder_name, uid_map=uid_map, study_label_map=study_label_map, offsets=offsets)
                         problems = verify_file(ds, source, anon_patient_folder_name)
                         if problems:
                             raise VerificationError(
@@ -456,7 +587,7 @@ class DicomAnonWidget(QWidget):
                 # add or update the mapping
                 date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 if new_patient:
-                    row = pd.Series({'patient_id':patient_id, 'anon_patient_dir_name':anon_patient_folder_name, 'total_session_count':session_count, 'valid_file_count':valid_file_count, 'invalid_file_count':invalid_file_count, 'last_updated':date_str})
+                    row = pd.Series({'patient_id':patient_id, 'anon_patient_dir_name':anon_patient_folder_name, 'total_session_count':session_count, 'valid_file_count':valid_file_count, 'invalid_file_count':invalid_file_count, 'last_updated':date_str, 'date_offset_days':offsets[0], 'time_offset_seconds':offsets[1]})
                     mapping_df = pd.concat([mapping_df, pd.DataFrame([row], columns=row.index)]).reset_index(drop=True)
                 else:
                     row_index = mapping_df.loc[mapping_df['patient_id'] == patient_id].index[0]
@@ -464,6 +595,12 @@ class DicomAnonWidget(QWidget):
                     mapping_df.loc[row_index, 'last_updated'] = date_str
                     mapping_df.loc[row_index, 'valid_file_count'] += valid_file_count
                     mapping_df.loc[row_index, 'invalid_file_count'] += invalid_file_count
+                    mapping_df.loc[row_index, 'date_offset_days'] = offsets[0]
+                    mapping_df.loc[row_index, 'time_offset_seconds'] = offsets[1]
+                # save as each patient finishes, not just at the end of the run. The
+                # offsets are only reusable if they survive, and a run that stops on a
+                # failed check must not lose the offsets it has already written files with.
+                self._save_mapping(mapping_df, self.mapping_file)
 
         return mapping_df, not_found_patients
 
@@ -484,9 +621,27 @@ class DicomAnonWidget(QWidget):
         self.destination_button.setEnabled(False)
         self.lookup_button.setEnabled(False)
         self.anon_button.setEnabled(False)
-        # load the lookup file
+        # set up the mapping file
+        mapping_file = self.mapping_file
+        # load and check the lookup file, then check it against what earlier runs
+        # already committed to. Rule 1: an assignment, once used, is permanent.
         try:
+            mapping_df = self._read_mapping(mapping_file)
             lookup_dict = self._load_lookup(self.lookup_file)
+            clashes = check_assignments(lookup_dict, self._recorded_assignments(mapping_df))
+            if clashes:
+                raise VerificationError(
+                    'The ID lookup file disagrees with folders that have already been '
+                    'written:\n\n{}\n\nThe earlier assignment is the one that counts. '
+                    'Correct the lookup file to match it, and do not edit the ID mapping '
+                    'file.'.format('\n'.join('  - ' + c for c in clashes)))
+        except VerificationError as e:
+            self._report_verification_failure(str(e))
+            self.source_button.setEnabled(True)
+            self.destination_button.setEnabled(True)
+            self.lookup_button.setEnabled(True)
+            self.anon_button.setEnabled(True)
+            return
         except Exception as e:
             self._display_error(f"Failed to load lookup file: {e}")
             self.source_button.setEnabled(True)
@@ -494,12 +649,6 @@ class DicomAnonWidget(QWidget):
             self.lookup_button.setEnabled(True)
             self.anon_button.setEnabled(True)
             return
-        # set up the mapping file
-        mapping_file = '{}dicom-anon-mapping.xlsx'.format(expanduser('~')+os.sep)
-        if os.path.isfile(mapping_file):
-            mapping_df = pd.read_excel(mapping_file, index_col=0)
-        else:
-            mapping_df = None
         # process UI events
         QApplication.processEvents()
         # verify as we go, and stop the run rather than write suspect data (defect 5)
@@ -520,7 +669,7 @@ class DicomAnonWidget(QWidget):
         # update the mapping file
         mapping_saved = mapping_df is not None
         if mapping_saved:
-            mapping_df.to_excel(mapping_file)
+            self._save_mapping(mapping_df, mapping_file)
         # process UI events
         QApplication.processEvents()
         # enable buttons
