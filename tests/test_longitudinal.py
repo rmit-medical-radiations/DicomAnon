@@ -123,7 +123,7 @@ lookup = w._load_lookup('lk5.xlsx')
 
 def run(label):
     w.verifier = RunVerifier()
-    m, missing = w.process_folder(SRC, DST, w._read_mapping(w.mapping_file), lookup)
+    m, missing, _ = w.process_folder(SRC, DST, w._read_mapping(w.mapping_file), lookup)
     w._save_mapping(m, w.mapping_file)
     print('  {}: {} files in the destination'.format(label, len(read_out())))
     return m

@@ -60,7 +60,7 @@ lookup = w._load_lookup('lk4.xlsx')
 
 def run():
     w.verifier = RunVerifier()
-    m, _ = w.process_folder(SRC, DST, w._read_mapping(w.mapping_file), lookup)
+    m, _, _ = w.process_folder(SRC, DST, w._read_mapping(w.mapping_file), lookup)
     w._save_mapping(m, w.mapping_file)
     return m
 

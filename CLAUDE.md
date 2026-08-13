@@ -139,6 +139,42 @@ Actions builds and have not been checked against this bug.
 
 ## Decision log
 
+### 2026-08-13: v0.10 crashed at the hospital, and the cause is still not known
+
+The oncologist ran v0.10, it anonymised one patient and then crashed. **No diagnosis
+yet.** What follows is what was fixed, not what happened, and the two must not be
+confused: two crash paths were found and closed, but there is no evidence that either
+is the one she hit.
+
+One speculative cause was floated and should be written off: that her source files might
+not be named `.dcm`. There is no evidence for it, and every local export uses `.dcm`. It
+is recorded only so nobody later mistakes it for a finding.
+
+**What is real.** Two paths in `process_folder` raised out of a windowed app, and
+`anon_button_clicked` caught only `VerificationError`, so the window simply died:
+
+- A patient whose folders yield no `.dcm` files. The destination is created inside the
+  file loop, so if nothing is written it does not exist, and `os.listdir` on it raised
+  `FileNotFoundError`. This is the bug recorded under defect 6 as a smaller thing noted
+  and not done. It was left undone and it reached a user.
+- Any write failing. `os.makedirs` and `ds.save_as` sat outside every `try`.
+
+Both are reproduced in `tests/test_crash.py`. The first now skips the patient and
+reports them, counting any non-`.dcm` files in the folder so that "empty" and "named
+something else" are distinguishable. The second is caught by a new handler that saves a
+report with the traceback, the source, output and lookup paths, and shows a dialog
+saying what it means for the data.
+
+**The point of the general handler is diagnosis, not repair.** The next failure, whatever
+it is, leaves a file the researcher can forward instead of a dead window. That is the
+only reason to believe the next report will be actionable, because this one was not.
+
+**To identify the actual cause, ask for:** `dicom-anon-mapping.xlsx` from her home
+folder, which is saved after every patient and so names exactly the last one that
+completed; the source folder that comes after it; and whatever the error dialog said, if
+one appeared. A frozen windowed build shows PyInstaller's traceback dialog on an
+unhandled exception, which is why `disable_windowed_traceback` must stay off.
+
 ### 2026-08-13: several source folders per patient is normal, not a collision
 
 The duplicate-patient-ID check was wrong, and a real export shows why.

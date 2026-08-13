@@ -65,7 +65,7 @@ print('=== clean source ===')
 build(contaminate=False)
 lookup = w._load_lookup('lookup.xlsx')
 w.verifier = __import__('anon_checks').RunVerifier()
-mapping, missing = w.process_folder(SRC, DST, None, lookup)
+mapping, missing, _ = w.process_folder(SRC, DST, None, lookup)
 written = sum(len(f) for _, _, f in os.walk(DST))
 print('  completed, {} files written, warnings: {}'.format(written, w.verifier.problems()))
 assert written == 5, written

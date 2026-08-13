@@ -20,6 +20,7 @@ TESTS = [
     ('test_state.py', 'defects 2, 3, 4: stable UIDs, per-patient maps, no version mixing'),
     ('test_longitudinal.py', 'three runs, RT objects referencing earlier studies'),
     ('test_collisions.py', 'one patient in several folders merges; two patients still stop'),
+    ('test_crash.py', 'a failed run leaves a report, not a dead window'),
     ('test_readme.py', 'the README lists exactly the tags the code blanks'),
     ('test_messy.py', 'defects 8 and 9: messy real data neither stops nor leaks'),
 ]

@@ -489,6 +489,44 @@ class DicomAnonWidget(QWidget):
         msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         msg.exec()
 
+    def _report_unexpected_failure(self, error):
+        """Turn a crash into a report the operator can forward.
+
+        The people who run this did not write it and cannot read a traceback, so the
+        dialog leads with what it means for their data and where the file is. The
+        traceback still goes in the file, because that is what we need to fix it.
+        """
+        import traceback
+        report_path = self._verification_report_path()
+        stamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        body = ('DicomAnon stopped unexpectedly at {}\n\n'
+                'Version: {}\nSource: {}\nOutput: {}\nLookup: {}\n\n{}\n'.format(
+                    stamp, TOOL_VERSION, self.source_dir, self.destination_dir,
+                    self.lookup_file,
+                    ''.join(traceback.format_exception(type(error), error,
+                                                       error.__traceback__))))
+        try:
+            with open(report_path, 'w') as f:
+                f.write(body)
+            saved = os.path.normpath(report_path)
+        except Exception:
+            saved = None
+        self.status_label.setText('Stopped: unexpected error.')
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Icon.Critical)
+        msg.setWindowTitle('Anonymisation Stopped')
+        msg.setText('DicomAnon stopped before it finished.')
+        msg.setInformativeText(
+            'This is a fault in the application, not something you did wrong.\n\n'
+            '{}: {}\n\nThe patients processed before this point were written and '
+            'verified normally, but the run is incomplete, so do not treat the output '
+            'folder as finished.{}\n\nPlease send that file to whoever supports this '
+            'tool.'.format(
+                type(error).__name__, error,
+                '\n\nDetails were saved to:\n{}'.format(saved) if saved else ''))
+        msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        msg.exec()
+
     def _report_verification_failure(self, detail):
         """Stop the run and tell the operator something they can forward verbatim.
 
@@ -551,6 +589,7 @@ class DicomAnonWidget(QWidget):
         for source_id, folder in recorded_owners(state_dir).items():
             self.verifier.record(source_id, folder)
         not_found_patients = []
+        no_files_patients = []
         # find the patient directories
         patient_dirs_l = [ name for name in os.listdir(source_base_dir) if os.path.isdir(os.path.join(source_base_dir, name)) ]
         # Group the source folders by patient ID. SEVERAL FOLDERS CAN BELONG TO ONE
@@ -604,6 +643,18 @@ class DicomAnonWidget(QWidget):
                     patient_full_dir = source_base_dir + os.sep + patient_dir
                     for f in glob.glob('{}/**/*.dcm'.format(patient_full_dir), recursive=True):
                         work.append((f, os.path.relpath(f, patient_full_dir)))
+                if not work:
+                    # No .dcm files under this patient's folders. Skipping is right, but
+                    # it must be said out loud: the glob only matches *.dcm, so an export
+                    # using another extension looks identical to an empty folder and
+                    # would otherwise be anonymised into nothing without a word. Counting
+                    # what IS there is what tells those two cases apart.
+                    others = 0
+                    for patient_dir in source_dirs:
+                        for _, _, names in os.walk(source_base_dir + os.sep + patient_dir):
+                            others += len(names)
+                    no_files_patients.append((patient_id, list(source_dirs), others))
+                    continue
                 self._check_merge_collisions(patient_id, source_dirs, work)
                 # this patient's own maps, reloaded from the last run. A fresh map would
                 # give the same source UID a new pseudonym (defect 2), and a shared one
@@ -715,7 +766,13 @@ class DicomAnonWidget(QWidget):
                     # process GUI events to reflect the update value
                     QApplication.processEvents()
                 # count the total sessions anonymised for this patient
-                anon_patient_sessions_l = [ name for name in os.listdir(anon_patient_dir) if os.path.isdir(os.path.join(anon_patient_dir, name)) ]
+                # Guarded: the destination is only created inside the file loop, so if
+                # nothing was written it does not exist, and listing it raised out of a
+                # windowed app.
+                try:
+                    anon_patient_sessions_l = [ name for name in os.listdir(anon_patient_dir) if os.path.isdir(os.path.join(anon_patient_dir, name)) ]
+                except OSError:
+                    anon_patient_sessions_l = []
                 session_count = len(anon_patient_sessions_l)
                 # update the status bar
                 self.status_label.setText('Updating the patient ID mapping.')
@@ -744,7 +801,7 @@ class DicomAnonWidget(QWidget):
                 state['tool_version'] = TOOL_VERSION
                 save_patient_state(state_dir, anon_patient_folder_name, state)
 
-        return mapping_df, not_found_patients
+        return mapping_df, not_found_patients, no_files_patients
 
     def anon_button_clicked(self):
         # get the file names under the directory selected
@@ -796,9 +853,20 @@ class DicomAnonWidget(QWidget):
         # verify as we go, and stop the run rather than write suspect data (defect 5)
         self.verifier = RunVerifier()
         try:
-            mapping_df, not_found_patients = self.process_folder(self.source_dir, self.destination_dir, mapping_df, lookup_dict)
+            mapping_df, not_found_patients, no_files_patients = self.process_folder(self.source_dir, self.destination_dir, mapping_df, lookup_dict)
         except VerificationError as e:
             self._report_verification_failure(str(e))
+            self.source_button.setEnabled(True)
+            self.destination_button.setEnabled(True)
+            self.lookup_button.setEnabled(True)
+            self.anon_button.setEnabled(True)
+            return
+        except Exception as e:
+            # Anything unforeseen. Without this the window simply dies, or shows
+            # PyInstaller's traceback dialog, and the person running it cannot act on
+            # either. The run is over regardless; what matters is that they are left
+            # holding something they can send on.
+            self._report_unexpected_failure(e)
             self.source_button.setEnabled(True)
             self.destination_button.setEnabled(True)
             self.lookup_button.setEnabled(True)
@@ -823,6 +891,25 @@ class DicomAnonWidget(QWidget):
         self.status_label.setText('Finished processing.')
         # report the checks that warn rather than stop the run
         self._report_verification_warnings()
+        # patients whose folders held no .dcm files at all
+        if no_files_patients:
+            lines = []
+            for patient_id, folders, others in no_files_patients:
+                lines.append('  - patient {} ({})'.format(patient_id, ', '.join(folders)))
+                lines.append('      no .dcm files; {} other file(s) in the folder'.format(
+                    others) if others else '      the folder is empty')
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setWindowTitle('Patients With No DICOM Files')
+            msg.setText('{} patient(s) were skipped because no .dcm files were found.'
+                        .format(len(no_files_patients)))
+            msg.setInformativeText(
+                '{}\n\nDicomAnon only reads files ending in .dcm. If these folders do '
+                'contain images under another name, nothing was anonymised for those '
+                'patients and this needs to be sorted out before the data is used.'
+                .format('\n'.join(lines)))
+            msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            msg.exec()
         # report patients not found in the lookup
         if not_found_patients:
             patient_list = '\n'.join(f'  - {pid}' for pid in not_found_patients)
