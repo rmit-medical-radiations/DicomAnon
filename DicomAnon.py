@@ -348,7 +348,28 @@ class DicomAnonWidget(QWidget):
                 shutil.copyfile(mapping_file, mapping_file + '.bak')
             except OSError:
                 pass  # a missing backup must not stop the run from recording the mapping
-        os.replace(tmp, mapping_file)
+        try:
+            os.replace(tmp, mapping_file)
+        except OSError as e:
+            # On Windows this fails if the spreadsheet is open in Excel, which locks the
+            # file. The run has to stop, because the offsets and folder assignments for
+            # everything processed after this point would exist nowhere. Say what to do
+            # about it: an operator can act on "close the spreadsheet", not on a
+            # PermissionError. The half-written temporary file is cleared away so it
+            # cannot be mistaken later for the real mapping.
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise VerificationError(
+                'The ID mapping spreadsheet could not be saved:\n\n  {}\n\n'
+                'This usually means the spreadsheet is open in Excel or another '
+                'program, which stops DicomAnon replacing it. Close it and run again.\n\n'
+                'Everything anonymised before this point is fine and will not be redone. '
+                'The run was stopped here because without the spreadsheet there would be '
+                'no record of which folder each patient was given, or of the date '
+                'offsets used, and neither can be worked out afterwards.'.format(
+                    os.path.normpath(mapping_file)))
 
     def _recorded_assignments(self, mapping_df):
         """{hospital id: anon folder} already committed to by an earlier run."""
@@ -449,6 +470,27 @@ class DicomAnonWidget(QWidget):
         """
         return '{}dicom-anon-verification.txt'.format(expanduser('~') + os.sep)
 
+    def _write_report(self, body):
+        """Write the report, keeping one previous generation alongside it.
+
+        All three reports share a single well-known filename so it can be documented and
+        found. That means a later run overwrites an earlier one, and a merely successful
+        run with warnings would silently destroy the failure report somebody was about to
+        send. One generation of history is enough to stop that being the only copy.
+        """
+        path = self._verification_report_path()
+        try:
+            if os.path.isfile(path):
+                shutil.copyfile(path, path.replace('.txt', '-previous.txt'))
+        except OSError:
+            pass  # a missing backup must not stop the report itself being written
+        try:
+            with open(path, 'w') as f:
+                f.write(body)
+            return os.path.normpath(path)
+        except Exception:
+            return None
+
     def _report_verification_warnings(self):
         """Findings that do not justify stopping a finished run, but must be seen.
 
@@ -471,14 +513,8 @@ class DicomAnonWidget(QWidget):
             lines.append('These entries are not DICOM keywords, so they blanked nothing:')
             lines.extend('  - ' + kw for kw in dodgy)
         detail = '\n'.join(lines)
-        report_path = self._verification_report_path()
-        try:
-            with open(report_path, 'w') as f:
-                f.write('DicomAnon verification warnings at {}\n\n{}\n'.format(
-                    datetime.now().strftime('%Y-%m-%d %H:%M:%S'), detail))
-            saved = os.path.normpath(report_path)
-        except Exception:
-            saved = None
+        saved = self._write_report('DicomAnon verification warnings at {}\n\n{}\n'.format(
+            datetime.now().strftime('%Y-%m-%d %H:%M:%S'), detail))
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Icon.Warning)
         msg.setWindowTitle('Check the Output Before Sharing It')
@@ -497,7 +533,6 @@ class DicomAnonWidget(QWidget):
         traceback still goes in the file, because that is what we need to fix it.
         """
         import traceback
-        report_path = self._verification_report_path()
         stamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         body = ('DicomAnon stopped unexpectedly at {}\n\n'
                 'Version: {}\nSource: {}\nOutput: {}\nLookup: {}\n\n{}\n'.format(
@@ -505,12 +540,7 @@ class DicomAnonWidget(QWidget):
                     self.lookup_file,
                     ''.join(traceback.format_exception(type(error), error,
                                                        error.__traceback__))))
-        try:
-            with open(report_path, 'w') as f:
-                f.write(body)
-            saved = os.path.normpath(report_path)
-        except Exception:
-            saved = None
+        saved = self._write_report(body)
         self.status_label.setText('Stopped: unexpected error.')
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Icon.Critical)
@@ -520,8 +550,10 @@ class DicomAnonWidget(QWidget):
             'This is a fault in the application, not something you did wrong.\n\n'
             '{}: {}\n\nThe patients processed before this point were written and '
             'verified normally, but the run is incomplete, so do not treat the output '
-            'folder as finished.{}\n\nPlease send that file to whoever supports this '
-            'tool.'.format(
+            'folder as finished.{}\n\nThat file is needed to diagnose this, but it can '
+            'contain patient identifiers, because folder and file names include them. '
+            'Send it the way your site requires identifiable data to be sent, not by '
+            'ordinary email.'.format(
                 type(error).__name__, error,
                 '\n\nDetails were saved to:\n{}'.format(saved) if saved else ''))
         msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -534,15 +566,9 @@ class DicomAnonWidget(QWidget):
         dialog has to name the folder and the problem in words, and the report file
         has to be somewhere they can find and attach.
         """
-        report_path = self._verification_report_path()
         stamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         body = 'DicomAnon verification failure at {}\n\n{}\n'.format(stamp, detail)
-        try:
-            with open(report_path, 'w') as f:
-                f.write(body)
-            saved = os.path.normpath(report_path)
-        except Exception:
-            saved = None
+        saved = self._write_report(body)
         self.status_label.setText('Stopped: verification failed.')
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Icon.Critical)

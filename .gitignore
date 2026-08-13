@@ -6,3 +6,6 @@ dist
 .DS_Store
 __pycache__/
 tests/__pycache__/
+
+# operational files from the hospital must never be committed to this public repo
+*.xlsx

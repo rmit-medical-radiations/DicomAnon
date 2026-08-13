@@ -114,7 +114,19 @@ Two situations stop a run rather than producing output that cannot be trusted:
 * **A patient was last processed by an older version of DicomAnon.** Everything already written for them has to be produced again with the current version, so that one folder never holds two different versions of the anonymisation. If the source no longer has all of that patient's data, DicomAnon lists exactly which files it cannot reproduce.
 
 ## Checks that can stop a run
-DicomAnon checks every file it anonymises before writing it, and stops the whole run if a check fails rather than carrying on and producing output nobody can trust. A dialog names the source file and what was wrong, and the same text is saved to `dicom-anon-verification.txt` in your home folder so you can send it on.
+DicomAnon checks every file it anonymises before writing it, and stops the whole run if a check fails rather than carrying on and producing output nobody can trust. A dialog names the source file and what was wrong, and the same text is saved to a report file so you can send it on.
+
+### Where the report file is, and how to handle it
+The report is always called `dicom-anon-verification.txt` and is saved in your **home folder**, the same place as the ID mapping spreadsheet:
+
+* Windows: `C:\Users\<your-username>\dicom-anon-verification.txt`. Press <kbd>Windows</kbd> + <kbd>R</kbd>, type `%USERPROFILE%` and press <kbd>Enter</kbd> to open that folder.
+* macOS: `/Users/<your-username>/dicom-anon-verification.txt`. In Finder choose **Go > Home**, or press <kbd>Shift</kbd> + <kbd>Command</kbd> + <kbd>H</kbd>.
+
+The dialog also shows the full path, and you can select it with the mouse and copy it.
+
+> **The report can contain patient identifiers.** It names the source files involved, and source folder and file names contain real patient IDs and names. It is deliberately kept out of the output folder for that reason. When sending it to whoever supports the tool, send it the way your institution requires identifiable data to be sent, not by ordinary email.
+
+It is rewritten each run, so if a run fails, copy it somewhere safe before running again.
 
 A run stops if:
 

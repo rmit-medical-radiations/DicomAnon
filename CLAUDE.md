@@ -139,7 +139,37 @@ Actions builds and have not been checked against this bug.
 
 ## Decision log
 
-### 2026-08-13: v0.10 crashed at the hospital, and the cause is still not known
+### 2026-08-13: the v0.10 crash, diagnosed from the file it left behind
+
+The leftover `dicom-anon-mapping.xlsx.tmp.xlsx` on the oncologist's machine is the
+evidence, and it says this: `_save_mapping` wrote the temporary file and then
+`os.replace(tmp, mapping_file)` did not complete. The temp file holds 33 rows, 32 stamped
+2026-01-27 from the original export and exactly one stamped the day of the run, with
+8591 files and its date offsets recorded. So one patient was anonymised in full, the
+mapping was built, the swap failed, and the exception escaped a windowed app.
+
+On Windows `os.replace` fails when the destination is locked, which is what having the
+spreadsheet open in Excel does. That is the likely trigger and it has not been confirmed
+with her yet, but the fix does not depend on which lock it was: any failure of that call
+now stops the run with "the spreadsheet is open in Excel or another program, close it and
+run again", and deletes the stray temp file so it cannot later be mistaken for the real
+mapping.
+
+**The temp file was the only copy of that patient's date offsets**, which is the part
+worth remembering. Offsets live in the mapping file and nowhere else, not in the
+per-patient state. Because the swap failed, the real mapping was still January's, with no
+offset for the patient just written. Re-running after discarding the temp file would
+generate a fresh offset every time while the 8591 files already on disk stayed shifted by
+the old one and were skipped as already written, leaving that patient's timeline
+inconsistent with the offset recorded for them. Recovery is to rename the temp file over
+the real one before re-running.
+
+Two dead ends worth recording so they are not rediscovered. The mapping file carries an
+`anon_patient_id` column the current code never writes; it is legacy from the 2024 build
+and harmless. And the copy sent for diagnosis had its hospital ID column deleted, which
+briefly looked like a mapping file with no patient IDs at all.
+
+### 2026-08-13: v0.10 crashed at the hospital, before the cause was known
 
 The oncologist ran v0.10, it anonymised one patient and then crashed. **No diagnosis
 yet.** What follows is what was fixed, not what happened, and the two must not be
