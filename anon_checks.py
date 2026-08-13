@@ -31,9 +31,14 @@ import secrets
 
 from pydicom.datadict import tag_for_keyword
 
-# Bumped whenever a change alters what the anonymiser writes. A patient whose folder was
+# Bumped whenever a change alters what the anonymiser WRITES. A patient whose folder was
 # written by an older version cannot have new files added beside the old ones (defect 4),
 # so this is compared against the version recorded in that patient's state.
+#
+# This is not the release version and is not expected to track it. Bumping it forces
+# every patient's folder to be produced again, so it must only change when the output
+# actually changes: v0.9 moved pydicom from 2.4.3 to 3.0.2 and left this at 0.8, because
+# the two versions were measured to write byte-identical files.
 TOOL_VERSION = '0.8'
 
 STUDY_ID_RE = re.compile(r'STUDY_\d+$')
