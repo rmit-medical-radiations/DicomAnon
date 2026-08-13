@@ -1,9 +1,13 @@
-"""Two source folders whose names parse to the same patient ID.
+"""Several source folders parsing to the same patient ID.
 
-Both would be written into one anonymised folder, so the run must stop. But only when
-the lookup actually names that patient: a source directory often holds folders belonging
-to another delivery, and halting for a patient that would have been skipped anyway is a
-false stop the researcher cannot act on.
+This is normal, not an error. The export names folders <PatientID>_<PatientName>, so a
+patient whose name is recorded two ways gets one folder per spelling: a real export
+contains 900001_SURNAME^GIVEN^R and 900001_SURNAME^GIVEN^R^MR, same person, same DICOM
+PatientID, different studies. Those must merge into that patient's one anon folder.
+
+What must still stop the run is two DIFFERENT patients sharing a parsed ID, which the
+folder name cannot distinguish but the source PatientID can, and two folders whose files
+would be written to the same path, where one would silently overwrite the other.
 """
 import os, sys, shutil, tempfile
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
@@ -12,6 +16,7 @@ os.chdir(tempfile.mkdtemp(prefix='dicomanon-test-'))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pandas as pd
+import pydicom
 from PyQt6.QtWidgets import QApplication
 from pydicom.dataset import Dataset, FileMetaDataset
 from pydicom.uid import generate_uid, ExplicitVRLittleEndian, MRImageStorage
@@ -20,68 +25,93 @@ from DicomAnon import DicomAnonWidget
 from _fixtures import save_dicom
 from anon_checks import RunVerifier, VerificationError
 
-SRC = os.path.abspath('csrc')
 
-
-def write(folder, pid):
+def write(root, folder, pid, session, name, sop=None):
     ds = Dataset()
-    ds.PatientID, ds.PatientName = pid, 'NAME^' + pid
+    ds.PatientID, ds.PatientName = pid, folder.split('_', 1)[1]
     ds.PatientBirthDate, ds.PatientSex = '19550312', 'M'
     ds.StudyDate, ds.StudyTime = '20210801', '101500'
     ds.StudyID = 'RMH-1'
     ds.StudyInstanceUID = generate_uid()
     ds.SeriesInstanceUID = generate_uid()
-    ds.SOPInstanceUID = generate_uid()
+    ds.SOPInstanceUID = sop or generate_uid()
     ds.SOPClassUID = MRImageStorage
     ds.file_meta = FileMetaDataset()
     ds.file_meta.MediaStorageSOPClassUID = MRImageStorage
     ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
     ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
-    d = os.path.join(SRC, folder, '20210801')
+    d = os.path.join(root, folder, session)
     os.makedirs(d, exist_ok=True)
-    save_dicom(ds, os.path.join(d, 'i.dcm'))
+    save_dicom(ds, os.path.join(d, name))
 
-
-shutil.rmtree(SRC, ignore_errors=True)
-# 0123 and 123 both parse to 123; Excel cannot even express the leading zero
-write('0123_SmithJohn', '123')
-write('123_JonesMary', '123')
-write('5678_BrownAnn', '5678')
 
 app = QApplication(sys.argv[:1])
 w = DicomAnonWidget()
-w.state_home = os.path.abspath('chome')
-w.mapping_file = os.path.abspath('chome/map.xlsx')
-os.makedirs(w.state_home, exist_ok=True)
+run_no = [0]
 
 
-def attempt(label, ids, anons):
-    pd.DataFrame({'Patient ID': ids, 'Anonymised ID': anons}).to_excel('lk.xlsx',
-                                                                      index=False)
+def attempt(label, root, ids, anons):
+    run_no[0] += 1
+    pd.DataFrame({'Patient ID': ids, 'Anonymised ID': anons}).to_excel('lk.xlsx', index=False)
+    w.state_home = os.path.abspath('home{}'.format(run_no[0]))
+    w.mapping_file = os.path.join(w.state_home, 'map.xlsx')
+    os.makedirs(w.state_home, exist_ok=True)
     lookup = w._load_lookup('lk.xlsx')
     w.verifier = RunVerifier()
-    out = os.path.abspath('out_' + anons[0])
+    out = os.path.abspath('out{}'.format(run_no[0]))
     os.makedirs(out, exist_ok=True)
     try:
-        w.process_folder(SRC, out, None, lookup)
-        print('  {:<46} proceeded'.format(label))
-        return None
+        w.process_folder(root, out, None, lookup)
+        print('  {:<48} proceeded'.format(label))
+        return out, None
     except VerificationError as e:
-        print('  {:<46} refused'.format(label))
-        return str(e)
+        print('  {:<48} stopped'.format(label))
+        return out, str(e)
 
 
-print('=== the colliding patient is not in the lookup ===')
-assert attempt('only the unaffected patient is named', ['5678'], ['Brain-0002']) is None, \
-    'halted for a patient that would have been skipped anyway'
+print('=== one patient, two folders, name recorded two ways ===')
+SAME = os.path.abspath('same')
+write(SAME, '900001_SURNAME^GIVEN^R', '900001', '20210801', 'a.dcm')
+write(SAME, '900001_SURNAME^GIVEN^R^MR', '900001', '20210915', 'c.dcm')
+write(SAME, '900001_SURNAME^GIVEN^R^MR', '900001', '20211001', 'd.dcm')
+out, err = attempt('same DICOM PatientID, distinct paths', SAME,
+                   ['900001'], ['Brain-0001'])
+assert err is None, err
+written = sorted(f for _, _, fs in os.walk(out) for f in fs)
+print('    merged into one anon folder: {} files, sessions {}'.format(
+    len(written), sorted(os.listdir(os.path.join(out, 'Brain-0001')))))
+assert len(written) == 3, written
+ids = {str(pydicom.dcmread(os.path.join(d, f)).PatientID)
+       for d, _, fs in os.walk(out) for f in fs}
+assert ids == {'Brain-0001'}, ids
+print('    every file carries the one anonymised identity')
 
-print('\n=== the colliding patient IS in the lookup ===')
-detail = attempt('the colliding patient is named', ['123'], ['Brain-0001'])
-assert detail, 'two folders with the same patient ID were accepted'
-assert '0123_SmithJohn' in detail and '123_JonesMary' in detail, detail
-print('  both source folders named in the message:')
-for line in detail.splitlines():
-    if line.strip().startswith('-'):
-        print('   ', line.strip())
+print('\n=== two DIFFERENT patients sharing a parsed ID ===')
+DIFF = os.path.abspath('diff')
+write(DIFF, '0123_SmithJohn', '123', '20210801', 'a.dcm')
+write(DIFF, '123_JonesMary', '999', '20210801', 'b.dcm')   # a different person
+out, err = attempt('different DICOM PatientIDs', DIFF, ['123'], ['Brain-0002'])
+assert err, 'two different patients were merged into one folder'
+print('    {}'.format([l.strip() for l in err.splitlines() if l.strip()][-1][:110]))
 
-print('\ncollision handling correct')
+print('\n=== two folders whose files land on the same path ===')
+CLASH = os.path.abspath('clash')
+write(CLASH, '555_A^B', '555', '20210801', 'i.dcm')
+write(CLASH, '555_A^B^MR', '555', '20210801', 'i.dcm')     # same rel path, different image
+out, err = attempt('same path, different instances', CLASH, ['555'], ['Brain-0003'])
+assert err, 'one file would have silently overwritten the other'
+print('    {}'.format(err.splitlines()[0][:110]))
+
+print('\n=== the same instance exported into both folders is not a collision ===')
+DUP = os.path.abspath('dup')
+shared = generate_uid()
+write(DUP, '777_C^D', '777', '20210801', 'i.dcm', sop=shared)
+write(DUP, '777_C^D^MR', '777', '20210801', 'i.dcm', sop=shared)
+out, err = attempt('same path, same instance', DUP, ['777'], ['Brain-0004'])
+assert err is None, err
+
+print('\n=== a folder the lookup never names causes no false stop ===')
+out, err = attempt('colliding patient not in the lookup', DIFF, ['5678'], ['Brain-0005'])
+assert err is None, err
+
+print('\nmerge and collision handling correct')

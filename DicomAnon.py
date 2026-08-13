@@ -388,6 +388,51 @@ class DicomAnonWidget(QWidget):
 
         return int(patient_str)
 
+    def _check_merge_collisions(self, patient_id, source_dirs, work):
+        """Refuse to let two source folders write different files to the same path.
+
+        Merging a patient's folders is safe only while their relative paths stay
+        distinct. If two folders both hold, say, `20210801/se1/i0.dcm`, one silently
+        overwrites the other and a study disappears with nothing to show for it.
+
+        The same instance exported twice is not a collision: it rewrites identical
+        output, which rule 3 says should simply overwrite. Only differing instances at
+        one path are a problem, so the SOP Instance UID is what decides, and it is read
+        only for the handful of paths that actually repeat.
+        """
+        if len(source_dirs) < 2:
+            return
+        seen = {}
+        repeated = set()
+        for source_file, rel_path in work:
+            if rel_path in seen:
+                repeated.add(rel_path)
+            seen.setdefault(rel_path, []).append(source_file)
+        if not repeated:
+            return
+        problems = []
+        for rel_path in sorted(repeated):
+            instances = {}
+            for source_file in seen[rel_path]:
+                try:
+                    ds = dcmread(source_file, stop_before_pixels=True,
+                                 specific_tags=['SOPInstanceUID'])
+                    key = str(getattr(ds, 'SOPInstanceUID', '') or source_file)
+                except Exception:
+                    key = source_file           # unreadable: treat as its own instance
+                instances.setdefault(key, []).append(source_file)
+            if len(instances) > 1:
+                problems.append('  - {}\n{}'.format(
+                    rel_path, '\n'.join('      ' + f for f in sorted(seen[rel_path]))))
+        if problems:
+            raise VerificationError(
+                'Patient {} has data in {} source folders, and {} of the files would be '
+                'written to the same place, so one would overwrite the other:\n\n{}\n\n'
+                'These are different images sharing a path, not the same image exported '
+                'twice. Separate them in the source before processing this patient.'
+                .format(patient_id, len(source_dirs), len(problems),
+                        '\n'.join(problems[:10])))
+
     def _display_error(self, message):
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Icon.Warning)
@@ -507,39 +552,38 @@ class DicomAnonWidget(QWidget):
         not_found_patients = []
         # find the patient directories
         patient_dirs_l = [ name for name in os.listdir(source_base_dir) if os.path.isdir(os.path.join(source_base_dir, name)) ]
-        # Two source folders that parse to the same patient ID would be written into one
-        # anon folder. Excel drops leading zeros, so the lookup file cannot even express
-        # the difference between 0123_X and 123_Y; the collision has to be caught here.
-        # Only folders the lookup actually names can collide: one that is not in the
-        # lookup is skipped and never written, so halting the run for it would be a
-        # false stop on a source folder holding patients from another delivery.
+        # Group the source folders by patient ID. SEVERAL FOLDERS CAN BELONG TO ONE
+        # PATIENT and that is normal: the export names folders <PatientID>_<PatientName>,
+        # so a patient whose name is recorded two ways, for example SIM^JEFFREY^R and
+        # SIM^JEFFREY^R^MR, gets a folder per spelling. They must merge into that
+        # patient's single anon folder, which is what the shared ID already asks for.
+        #
+        # This used to refuse the run outright, which was wrong: the danger is two
+        # DIFFERENT patients sharing a parsed ID, and the folder NAME cannot tell the two
+        # cases apart. The source PatientID can, and RunVerifier checks exactly that as
+        # each file is read, so a genuine collision still stops the run.
         by_parsed_id = {}
-        for name in patient_dirs_l:
+        unparseable = []
+        for name in sorted(patient_dirs_l):
             try:
                 parsed = self._parse_patient_id(name)
-            except Exception:
-                continue  # reported per patient in the loop below
-            if str(parsed) in lookup_dict:
-                by_parsed_id.setdefault(parsed, []).append(name)
-        collisions = {pid: names for pid, names in by_parsed_id.items() if len(names) > 1}
-        if collisions:
-            raise VerificationError(
-                'Different source folders have the same patient ID, so they would be '
-                'written into the same anonymised folder:\n\n{}'.format('\n'.join(
-                    '  - patient ID {} comes from: {}'.format(pid, ', '.join(sorted(names)))
-                    for pid, names in sorted(collisions.items()))))
+            except Exception as e:
+                unparseable.append('{}: {}'.format(name, e))
+                continue
+            by_parsed_id.setdefault(parsed, []).append(name)
+        if unparseable:
+            # Report and carry on. This used to break out of the loop, abandoning every
+            # remaining patient while still saving the mapping for those already done.
+            self._display_error(
+                'These folders are not named <patientID>_<name> with a numeric ID and '
+                'were skipped:\n\n{}'.format('\n'.join('  - ' + u for u in unparseable)))
         if len(patient_dirs_l) == 0:
             self._display_error(f'There are no patient directories under {source_base_dir}')
         else:
-            for patient_dir_idx,patient_dir in enumerate(patient_dirs_l):
+            for patient_id, source_dirs in sorted(by_parsed_id.items()):
                 valid_file_count = 0
                 invalid_file_count = 0
                 skipped_file_count = 0
-                try:
-                    patient_id = self._parse_patient_id(patient_dir)
-                except Exception as e:
-                    self._display_error(f"Error parsing patient ID: {e}")
-                    break
                 patient_id_str = str(patient_id)
                 if patient_id_str not in lookup_dict:
                     print('patient ID {} not found in lookup file - skipping'.format(patient_id))
@@ -551,8 +595,15 @@ class DicomAnonWidget(QWidget):
                 # keep their true spacing from the ones already anonymised
                 offsets = self._patient_offsets(mapping_df, patient_id)
                 anon_patient_dir = destination_base_dir + os.sep + anon_patient_folder_name
-                patient_full_dir = source_base_dir + os.sep + patient_dir
-                dicom_files = glob.glob('{}/**/*.dcm'.format(patient_full_dir), recursive=True)
+                # every source folder belonging to this patient, as (source file, path
+                # under the anon folder). The relative path is taken from each folder's
+                # own root, so the two spellings of a name interleave cleanly.
+                work = []
+                for patient_dir in source_dirs:
+                    patient_full_dir = source_base_dir + os.sep + patient_dir
+                    for f in glob.glob('{}/**/*.dcm'.format(patient_full_dir), recursive=True):
+                        work.append((f, os.path.relpath(f, patient_full_dir)))
+                self._check_merge_collisions(patient_id, source_dirs, work)
                 # this patient's own maps, reloaded from the last run. A fresh map would
                 # give the same source UID a new pseudonym (defect 2), and a shared one
                 # would link patients through a UID they have in common (defect 3).
@@ -560,7 +611,7 @@ class DicomAnonWidget(QWidget):
                          or new_patient_state(anon_patient_folder_name, patient_id))
                 uid_map = state['uid_map']
                 study_label_map = state['study_label_map']
-                planned = [os.path.relpath(f, patient_full_dir) for f in dicom_files]
+                planned = [rel for _, rel in work]
                 stranded = stale_files(state, planned)
                 if stranded:
                     raise VerificationError(
@@ -580,8 +631,7 @@ class DicomAnonWidget(QWidget):
                 self.status_label.setText('Processing patient ID {}'.format(patient_id))
                 # process GUI events to reflect the update value
                 QApplication.processEvents()
-                for source_file in dicom_files:
-                    rel_path = os.path.relpath(source_file, patient_full_dir)  # use the same relative path for source and target
+                for source_file, rel_path in work:
                     anon_patient_file = anon_patient_dir + os.sep + rel_path   # add the relative path to the anon directory
                     # Already written by this version, so writing it again would produce
                     # the same bytes. Skipping matters at the scale this runs at: without

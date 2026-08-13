@@ -139,6 +139,59 @@ Actions builds and have not been checked against this bug.
 
 ## Decision log
 
+### 2026-08-13: several source folders per patient is normal, not a collision
+
+The duplicate-patient-ID check was wrong, and a real export shows why.
+A local pre-anonymisation test export contains `900001_SURNAME^GIVEN^R` and `900001_SURNAME^GIVEN^R^MR`. That
+is **one patient**, measured: both folders carry DICOM `PatientID` 900001, and only
+`PatientName` differs by a trailing `^MR` component. The export names folders
+`<PatientID>_<PatientName>`, so a patient whose name is recorded two ways in the source
+system gets one folder per spelling.
+
+Refusing that run was a false stop on something the data does routinely. Worse, the check
+was reasoning from the **folder name**, which cannot tell "one patient, two spellings"
+from "two patients, one parsed ID". The source `PatientID` can, and `RunVerifier` already
+tests exactly that as each file is read, so the accurate check was there all along and the
+folder-name check was both redundant and harmful.
+
+Now: source folders are grouped by parsed patient ID and all of a patient's folders are
+processed into their single anon folder, sharing one state, one UID map and one study
+numbering. A genuine collision, two different source `PatientID`s reaching one anon
+folder, still stops the run.
+
+**Merging needs one guard the old code did not have.** Two folders could hold the same
+relative path, and the second write would silently overwrite the first. `_check_merge_collisions`
+compares the paths that repeat and reads only those files: the same instance exported
+twice is not a collision and should simply overwrite, per rule 3, while two different
+instances at one path is data loss and stops the run. The real folders share no path,
+SOP UID or study UID, but that is luck rather than a guarantee.
+
+Verified on the real thing: the two folders merged into one anon folder, 6048 files
+(926 + 5122), 19 study labels, 6261 UIDs, one source `PatientID` recorded, one identity
+in the output, no warnings, and every modality preserved (MR, CT, RTSTRUCT, REG, RTDOSE,
+RTPLAN, PR). The previous code refused this run outright.
+
+Fixed in passing, since the loop was being rewritten: a folder whose name does not parse
+used to `break`, abandoning every remaining patient while still saving the mapping for
+those already done. It now collects those folders, reports them in one dialog and carries
+on, the way an unknown patient ID already did.
+
+#### A UI element that is not a UID
+
+The run warned about `(2005,1395)` holding
+`'7,IMAGE_TYPE,SLICE_NUMBER,ECHO_NUMBER,...'`, 113 characters in a `UI` element. Worth
+chasing, because `_anonymise_uids_recursive` walks by VR and would have replaced that
+descriptive string with a generated UID, corrupting data that is not identifying.
+
+It does not, and the reason is ordering: the tag is **private**, and
+`remove_private_tags()` runs before the UID remapping, so it is gone before anything can
+rewrite it. Confirmed on the output: no private tags and no `(2005,1395)` in any file.
+
+A scan of all 6234 files found this to be the **only** `UI` element in the whole dataset
+not holding a UID-shaped value, and it is private. So walking by VR is safe here, but the
+margin is the ordering of two lines in `anonymise_dicom`. If private tag removal ever
+moves after UID remapping, this breaks silently.
+
 ### 2026-08-13: pydicom moved to 3.0.2, and TOOL_VERSION deliberately not bumped
 
 `requirements.txt` pinned `pydicom==2.4.3` while every real-data trial had been run
