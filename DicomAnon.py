@@ -2,6 +2,7 @@ import sys
 import glob
 import os
 import shutil
+import time
 from PyQt6.QtWidgets import QWidget, QPushButton, QProgressBar, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QApplication, QFileDialog, QLabel, QLineEdit, QMessageBox, QSizePolicy
 from PyQt6.QtCore import Qt, QT_VERSION_STR, PYQT_VERSION_STR
 from pydicom import dcmread
@@ -348,28 +349,38 @@ class DicomAnonWidget(QWidget):
                 shutil.copyfile(mapping_file, mapping_file + '.bak')
             except OSError:
                 pass  # a missing backup must not stop the run from recording the mapping
-        try:
-            os.replace(tmp, mapping_file)
-        except OSError as e:
-            # On Windows this fails if the spreadsheet is open in Excel, which locks the
-            # file. The run has to stop, because the offsets and folder assignments for
-            # everything processed after this point would exist nowhere. Say what to do
-            # about it: an operator can act on "close the spreadsheet", not on a
-            # PermissionError. The half-written temporary file is cleared away so it
-            # cannot be mistaken later for the real mapping.
+        # Windows refuses this while anything holds a handle on the destination, and
+        # not only Excel: OneDrive sync, an indexer or a virus scanner will do it, often
+        # for a moment after the file was just written. Retry briefly before giving up,
+        # because a transient holder is the common case and a few seconds of patience is
+        # cheaper than ending a run that has done real work.
+        last = None
+        for attempt in range(6):
             try:
-                os.remove(tmp)
-            except OSError:
-                pass
+                os.replace(tmp, mapping_file)
+                last = None
+                break
+            except OSError as e:
+                last = e
+                time.sleep(0.5)
+                QApplication.processEvents()
+        if last is not None:
+            # The temporary file is KEPT. It holds the only up-to-date copy of the
+            # mapping, and at the hospital it turned out to be the only record of a
+            # patient's date offsets and the sole evidence of what had failed. Deleting
+            # it to keep the folder tidy would have destroyed both.
             raise VerificationError(
-                'The ID mapping spreadsheet could not be saved:\n\n  {}\n\n'
-                'This usually means the spreadsheet is open in Excel or another '
-                'program, which stops DicomAnon replacing it. Close it and run again.\n\n'
-                'Everything anonymised before this point is fine and will not be redone. '
-                'The run was stopped here because without the spreadsheet there would be '
-                'no record of which folder each patient was given, or of the date '
-                'offsets used, and neither can be worked out afterwards.'.format(
-                    os.path.normpath(mapping_file)))
+                'The ID mapping spreadsheet could not be saved.\n\n'
+                'Tried to replace:\n  {}\n\nThe error was:\n  {}\n\n'
+                'Something on this computer is holding that file open. It may be Excel, '
+                'but OneDrive, a backup tool or antivirus software can do the same. '
+                'Nothing was lost: the up-to-date spreadsheet was written to\n  {}\n\n'
+                'If this keeps happening, close anything that might be using the file '
+                'and run again. If it still fails, rename that second file over the '
+                'first, keeping a copy of the original, and send this message on.\n\n'
+                'The patients already anonymised are recorded and will not be done '
+                'again.'.format(os.path.normpath(mapping_file), last,
+                                os.path.normpath(tmp)))
 
     def _recorded_assignments(self, mapping_df):
         """{hospital id: anon folder} already committed to by an earlier run."""

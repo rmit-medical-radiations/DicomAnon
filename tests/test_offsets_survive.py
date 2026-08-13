@@ -59,3 +59,35 @@ w2.state_home = w.state_home; w2.mapping_file = w.mapping_file
 print('\nnext run reuses them        :', w2._patient_offsets(None, 1111, st))
 assert tuple(w2._patient_offsets(None, 1111, st)) == tuple(st['offsets'])
 print('\noffsets survive a failed spreadsheet write')
+
+# The temporary spreadsheet must be KEPT when the swap fails. At the hospital it was the
+# only up-to-date copy of the mapping, the only record of a patient's date offsets, and
+# the only evidence of what had gone wrong. An earlier version of this fix deleted it.
+tmp = w.mapping_file + '.tmp.xlsx'
+print('\ntemporary spreadsheet kept  :', os.path.isfile(tmp))
+assert os.path.isfile(tmp), 'the only up-to-date copy of the mapping was deleted'
+report = open(os.path.abspath('report.txt')).read()
+assert os.path.normpath(tmp) in report, 'the report does not say where that copy is'
+print('report names it             : True')
+assert 'Excel' in report and 'OneDrive' in report, report[:200]
+print('cause left open, not blamed on Excel alone')
+
+# and a transient holder should be ridden out rather than ending the run
+attempts = {'n': 0}
+def fails_twice(a, b):
+    attempts['n'] += 1
+    if str(b).endswith('map.xlsx') and attempts['n'] <= 2:
+        raise PermissionError(13, 'locked')
+    return real_replace(a, b)
+
+os.replace = fails_twice
+try:
+    w3 = DicomAnonWidget()
+    w3.state_home = w.state_home
+    w3._save_mapping(pd.DataFrame([{'patient_id': 1111}]), w.mapping_file)
+finally:
+    os.replace = real_replace
+print('\nretried through a transient lock, {} attempts, run continued'.format(attempts['n']))
+assert attempts['n'] > 1, 'no retry happened'
+assert not os.path.isfile(tmp), 'the temporary file was left behind after success'
+print('temporary file cleared once it succeeded')

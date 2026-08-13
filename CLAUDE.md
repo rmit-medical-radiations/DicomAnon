@@ -153,7 +153,19 @@ dead, and it was the third wrong guess in this incident after the file extension
 network share. What she did say is decisive in another way: "I repeated about 4 times and
 each time it only does brain 002." The failure is deterministic, not a transient lock.
 
-That narrows it to two candidates, and one observation separates them. `_save_mapping`
+**She has since said each attempt took about ten minutes**, which settles it. Ten minutes
+is the run re-anonymising all 8591 files; skipping them takes seconds. So nothing was
+recorded between attempts, and the failure is in `_save_mapping`, which ran before
+`save_patient_state`. It also means she must be clearing or changing the output folder
+between attempts, or the second run would have been refused for holding data with no
+state rather than crashing again.
+
+What actually raises there is still unknown, and after three wrong guesses it is not
+worth a fourth. `os.replace` is now retried six times over three seconds, because the
+usual Windows causes (OneDrive, an indexer, a virus scanner) release the handle in that
+window, and only then does it give up.
+
+The original reasoning that got here: `_save_mapping`
 ran BEFORE `save_patient_state`, so if the spreadsheet write fails the state is never
 recorded and the next run redoes the whole patient. If instead the crash came after the
 state was saved, the retry would skip those files in seconds. **So: is each retry slow,
@@ -163,8 +175,10 @@ already fixed.
 
 The fix does not depend on which lock it was: any failure of that call
 now stops the run with "the spreadsheet is open in Excel or another program, close it and
-run again", and deletes the stray temp file so it cannot later be mistaken for the real
-mapping.
+run again", and KEEPS the temporary file, naming it in the message. An earlier version of
+this fix deleted it for tidiness, which would have destroyed both the only up-to-date
+copy of the mapping and the only evidence of the failure. That was the wrong instinct and
+the incident is exactly why.
 
 **The temp file was the only copy of that patient's date offsets**, which is the part
 worth remembering. Offsets live in the mapping file and nowhere else, not in the
