@@ -43,21 +43,32 @@ offsets = (-1234, 45678)
 
 print('=== every DA/TM/DT element moves, including inside nested sequences ===')
 ds = make(); snap = snapshot_source(ds)
-before = {str(e.tag): str(e.value) for e in ds.iterall() if e.VR in DATE_VRS}
+# Key by keyword, not by str(tag): pydicom renders a tag as '(0008,0020)' on 3.x and
+# '(0008, 0020)' on 2.x, and the released build is pinned to 2.4.3.
+def by_keyword(dataset):
+    out = {}
+    for e in dataset.iterall():
+        if e.VR in DATE_VRS and str(e.value).strip():
+            out.setdefault(e.keyword or str(e.tag), set()).add(str(e.value))
+    return out
+
+before = by_keyword(ds)
 w.anonymise_dicom(ds=ds, anon_name='Brain-0001', offsets=offsets)
-after = {str(e.tag): str(e.value) for e in ds.iterall() if e.VR in DATE_VRS}
-unchanged = [t for t in before if t in after and before[t] == after[t] and before[t].strip()]
-print('  {} date/time elements, {} unchanged'.format(len(before), len(unchanged)))
+after = by_keyword(ds)
+unchanged = {k: before[k] & after.get(k, set()) for k in before if before[k] & after.get(k, set())}
+print('  {} date/time keywords, {} still holding a source value'.format(
+    len(before), len(unchanged)))
 assert not unchanged, unchanged
-print('  StudyDate  {} -> {}'.format(before.get('(0008,0020)'), after.get('(0008,0020)')))
-print('  StudyTime  {} -> {}'.format(before.get('(0008,0030)'), after.get('(0008,0030)')))
-print('  AcqDateTime -> {}'.format(after.get('(0008,002A)')))
-print('  nested ContentDate moved too:', after.get('(0008,0023)'))
+print('  StudyDate  {} -> {}'.format(before['StudyDate'], after['StudyDate']))
+print('  StudyTime  {} -> {}'.format(before['StudyTime'], after['StudyTime']))
+print('  AcqDateTime -> {}'.format(after['AcquisitionDateTime']))
+print('  nested ContentDate moved too:', after['ContentDate'])
 print('  SeriesDescription -> {}'.format(ds.SeriesDescription))
 # a DA/TM pair and a DT holding the same instant must agree after shifting
-assert after.get('(0008,002A)').startswith(after.get('(0008,0020)')), (
-    'StudyDate {} disagrees with AcquisitionDateTime {}'.format(
-        after.get('(0008,0020)'), after.get('(0008,002A)')))
+study_date = str(ds.StudyDate)
+acq_dt = str(ds.AcquisitionDateTime)
+assert acq_dt.startswith(study_date), (
+    'StudyDate {} disagrees with AcquisitionDateTime {}'.format(study_date, acq_dt))
 print('  StudyDate agrees with AcquisitionDateTime')
 assert '20210819' not in ds.SeriesDescription
 print('  PatientAge kept: {}  birth date: {}'.format(ds.PatientAge, ds.PatientBirthDate))

@@ -6,11 +6,13 @@ import os, sys, tempfile
 # the real ID mapping file, or the real state under the home folder.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(tempfile.mkdtemp(prefix='dicomanon-test-'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pandas as pd, pydicom
 from PyQt6.QtWidgets import QApplication
 from pydicom.dataset import Dataset, FileMetaDataset
 from pydicom.uid import generate_uid, ExplicitVRLittleEndian, MRImageStorage
 from DicomAnon import DicomAnonWidget
+from _fixtures import save_dicom
 from anon_checks import RunVerifier, VerificationError
 
 SRC, DST, MAP = 'msrc', 'mout', 'mapping.xlsx'
@@ -29,7 +31,7 @@ def write(session, day):
     ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
     ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
     d = os.path.join(SRC, '1234_SmithJohn', session); os.makedirs(d, exist_ok=True)
-    ds.save_as(os.path.join(d, 'i.dcm'), enforce_file_format=True)
+    save_dicom(ds, os.path.join(d, 'i.dcm'))
 
 def study_dates():
     out = {}

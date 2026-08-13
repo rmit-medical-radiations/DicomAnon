@@ -9,6 +9,7 @@ import os, sys, shutil, tempfile
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(tempfile.mkdtemp(prefix='dicomanon-test-'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pandas as pd
 from PyQt6.QtWidgets import QApplication
@@ -16,6 +17,7 @@ from pydicom.dataset import Dataset, FileMetaDataset
 from pydicom.uid import generate_uid, ExplicitVRLittleEndian, MRImageStorage
 
 from DicomAnon import DicomAnonWidget
+from _fixtures import save_dicom
 from anon_checks import RunVerifier, VerificationError
 
 SRC = os.path.abspath('csrc')
@@ -37,7 +39,7 @@ def write(folder, pid):
     ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
     d = os.path.join(SRC, folder, '20210801')
     os.makedirs(d, exist_ok=True)
-    ds.save_as(os.path.join(d, 'i.dcm'), enforce_file_format=True)
+    save_dicom(ds, os.path.join(d, 'i.dcm'))
 
 
 shutil.rmtree(SRC, ignore_errors=True)
