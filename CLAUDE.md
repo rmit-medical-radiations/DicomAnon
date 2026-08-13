@@ -49,8 +49,11 @@ No reference was broken that was not already broken in the source. Noted along t
 2928 of 3603 references in the source's registration objects already dangle, which is a
 question for the hospital about what the export omits.
 
-Still untried on real data: a full-size patient folder (these were around 1 GB against
-roughly 9 GB per patient in the export).
+**2026-08-13: trialled at full scale** on the export's largest patient (45359 files,
+25 GB): 17 minutes, zero verification failures, and the contamination warning fired on a
+genuinely contaminated folder. **Budget about 4.6 hours for a full rebuild.** Peak memory
+was 4.4 GB for one patient and should be watched across a 33-patient run; if it grows,
+process patients in separate runs, since an interrupted rebuild now resumes cheaply.
 
 **2026-08-13: DicomAnon now verifies every file it writes and stops the run on failure**,
 including the check that an anon folder only ever receives one source patient, which is
@@ -135,6 +138,50 @@ v0.3 and earlier still carry hand-uploaded assets. They predate the GitHub
 Actions builds and have not been checked against this bug.
 
 ## Decision log
+
+### 2026-08-13: full-size trial, and the numbers to plan the rebuild with
+
+Third trial, on the largest patient in the export (45359 files, 25 GB) staged as a source
+folder via an APFS clone, so it cost no extra disk and the export was never written to.
+Note this is already-anonymised data being anonymised again: it exercises scale,
+throughput and robustness, not the source-side identity logic, because every file carries
+the same `PatientID`.
+
+| | |
+|---|---|
+| files | 45359, all written, **zero verification failures** |
+| elapsed | 994 s (17 min) |
+| throughput | 46 files/s, 27 MB/s |
+| output size | unchanged from the source, within measurement noise |
+| peak memory | **4.4 GB** |
+| state file | 9.3 MB: 28031 UIDs, 53 study labels, 45359 files tracked |
+
+**Extrapolated to the full export: about 4.6 hours for 761631 files.** That is the number
+to plan the rebuild with, measured on a laptop with source and destination on one disk.
+
+Three things worth carrying forward.
+
+**No false stops at scale.** 45359 real files, every one verified, none rejected. After
+defects 8 and 9 that was the open question, and this is the strongest evidence so far
+that the checks do not misfire on real data.
+
+**Peak memory of 4.4 GB for one patient needs watching.** It is a high-water mark rather
+than steady state, but the rebuild processes 33 patients in one run and nothing here
+shows whether it grows across them. Watch it, and if it does grow, process patients in
+separate runs: state is saved per patient and files already written at the current
+version are skipped, so an interrupted rebuild resumes cheaply rather than starting over.
+
+**The contamination warning fired on genuinely contaminated real data.** Brain-0005 is one
+of the 18 mixed folders, and the run reported it holding more than one birth year or sex.
+It *warned* rather than stopped, which is correct here and worth understanding: the input
+was already anonymised so every file carried one `PatientID`, leaving only the weak proxy
+to fire. In the real rebuild, from true source data, the same contamination would be
+caught by the source `PatientID` check and would **stop** the run. That difference is
+exactly why the source-side check is the one that matters.
+
+Also confirmed: `check-anon-output.py` over the result reported **no stale output at all**,
+so the 438 files in that folder that still carried real birth dates and populated
+identifying tags were properly cleaned this time.
 
 ### 2026-08-13: RT trial, the case the persisted UID map exists for
 
