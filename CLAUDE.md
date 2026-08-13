@@ -148,9 +148,20 @@ evidence, and it says this: `_save_mapping` wrote the temporary file and then
 8591 files and its date offsets recorded. So one patient was anonymised in full, the
 mapping was built, the swap failed, and the exception escaped a windowed app.
 
-On Windows `os.replace` fails when the destination is locked, which is what having the
-spreadsheet open in Excel does. That is the likely trigger and it has not been confirmed
-with her yet, but the fix does not depend on which lock it was: any failure of that call
+**She has since confirmed the spreadsheet was NOT open in Excel**, so that theory is
+dead, and it was the third wrong guess in this incident after the file extension and a
+network share. What she did say is decisive in another way: "I repeated about 4 times and
+each time it only does brain 002." The failure is deterministic, not a transient lock.
+
+That narrows it to two candidates, and one observation separates them. `_save_mapping`
+ran BEFORE `save_patient_state`, so if the spreadsheet write fails the state is never
+recorded and the next run redoes the whole patient. If instead the crash came after the
+state was saved, the retry would skip those files in seconds. **So: is each retry slow,
+reprocessing all 8591 files, or nearly instant?** Slow means the failure is in the
+spreadsheet write; fast means it is later, most likely the empty-folder `os.listdir`
+already fixed.
+
+The fix does not depend on which lock it was: any failure of that call
 now stops the run with "the spreadsheet is open in Excel or another program, close it and
 run again", and deletes the stray temp file so it cannot later be mistaken for the real
 mapping.
@@ -163,6 +174,11 @@ generate a fresh offset every time while the 8591 files already on disk stayed s
 the old one and were skipped as already written, leaving that patient's timeline
 inconsistent with the offset recorded for them. Recovery is to rename the temp file over
 the real one before re-running.
+
+Fixed properly as well: offsets are now written into the per-patient state too, and the
+state is saved BEFORE the spreadsheet. The state is what makes a run resumable, so losing
+it to a failure saving a spreadsheet was the wrong way round. `tests/test_offsets_survive.py`
+fails the build if a failed mapping write loses them again.
 
 Two dead ends worth recording so they are not rediscovered. The mapping file carries an
 `anon_patient_id` column the current code never writes; it is legacy from the 2024 build

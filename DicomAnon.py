@@ -378,7 +378,7 @@ class DicomAnonWidget(QWidget):
         return {str(row.patient_id): str(row.anon_patient_dir_name)
                 for row in mapping_df.itertuples()}
 
-    def _patient_offsets(self, mapping_df, patient_id):
+    def _patient_offsets(self, mapping_df, patient_id, state=None):
         """This patient's stored date offsets, or a fresh pair if they are new.
 
         Reused across runs on purpose. The oncologist adds studies to a patient over
@@ -392,6 +392,8 @@ class DicomAnonWidget(QWidget):
                 seconds = rows.iloc[0].get('time_offset_seconds', 0)
                 if pd.notna(days):
                     return int(days), int(seconds if pd.notna(seconds) else 0)
+        if state and state.get('offsets'):
+            return tuple(state['offsets'])
         return new_offsets()
 
     def _is_new_patient(self, patient_id, mapping_df):
@@ -657,9 +659,6 @@ class DicomAnonWidget(QWidget):
                     continue
                 anon_patient_folder_name = lookup_dict[patient_id_str]
                 new_patient = self._is_new_patient(patient_id, mapping_df)
-                # reused for a patient already in the mapping, so studies added later
-                # keep their true spacing from the ones already anonymised
-                offsets = self._patient_offsets(mapping_df, patient_id)
                 anon_patient_dir = destination_base_dir + os.sep + anon_patient_folder_name
                 # every source folder belonging to this patient, as (source file, path
                 # under the anon folder). The relative path is taken from each folder's
@@ -689,6 +688,13 @@ class DicomAnonWidget(QWidget):
                          or new_patient_state(anon_patient_folder_name, patient_id))
                 uid_map = state['uid_map']
                 study_label_map = state['study_label_map']
+                # Reused for a patient already recorded, so studies added later keep
+                # their true spacing from the ones already anonymised. Read from the
+                # mapping file first, since that is the human-readable key, but fall
+                # back to the state: an incident at the hospital lost a patient's
+                # offsets because the mapping write failed after their files had been
+                # written, and offsets existed nowhere else.
+                offsets = self._patient_offsets(mapping_df, patient_id, state)
                 planned = [rel for _, rel in work]
                 stranded = stale_files(state, planned)
                 if stranded:
@@ -822,10 +828,13 @@ class DicomAnonWidget(QWidget):
                 # save as each patient finishes, not just at the end of the run. The
                 # offsets are only reusable if they survive, and a run that stops on a
                 # failed check must not lose the offsets it has already written files with.
-                self._save_mapping(mapping_df, self.mapping_file)
-                # the UID map is only worth having if it outlives the run that built it
+                # State first. It is what makes the run resumable, and saving the
+                # spreadsheet is the step that failed at the hospital, taking the whole
+                # patient's work with it because nothing had been recorded yet.
                 state['tool_version'] = TOOL_VERSION
+                state['offsets'] = list(offsets)
                 save_patient_state(state_dir, anon_patient_folder_name, state)
+                self._save_mapping(mapping_df, self.mapping_file)
 
         return mapping_df, not_found_patients, no_files_patients
 
