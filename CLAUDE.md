@@ -38,9 +38,13 @@ not analysis. Two things to keep in view:
 
 - **The existing export has to be rebuilt**, both because of the contamination above and
   because the tool now refuses to add to a destination it has no state for.
-- **v0.8 has never run against real DICOM.** The tests are synthetic, and defects 8 and 9
-  are a fair warning about what a first real run may turn up. Run it over one patient
-  before committing to the full rebuild.
+- **v0.8 has now been trialled on real DICOM** (one patient, 1293 files, real Philips MR)
+  and the output verified against the source. It found one blocker, since fixed: every
+  run rewrote the entire destination, about nine hours for the real export. Re-runs with
+  nothing changed are now instant. See the decision log.
+
+Still untried on real data: a patient with RT structure sets and registrations, which is
+where the persisted UID map earns its keep, and a full-size patient folder.
 
 **2026-08-13: DicomAnon now verifies every file it writes and stops the run on failure**,
 including the check that an anon folder only ever receives one source patient, which is
@@ -125,6 +129,48 @@ v0.3 and earlier still carry hand-uploaded assets. They predate the GitHub
 Actions builds and have not been checked against this bug.
 
 ## Decision log
+
+### 2026-08-13: v0.8 trialled on real DICOM, and the rewrite problem it exposed
+
+First run of v0.8 against real scanner data rather than fixtures, using the local
+pre-anonymisation test datasets (`Test-GBM-Sorted-*`), one patient into an empty
+destination. Real Philips MR, three sessions, 1293 files.
+
+**It worked, and the output is correct.** Verified against the source file by file:
+
+- 309 private tags in the source, 0 in the output;
+- all 20 `DA`/`TM`/`DT` elements in the sample file changed, none retained;
+- 0 overlap between source and output UIDs;
+- `InstitutionName` and `StationName` populated in the source, blank in the output;
+- study spacing preserved exactly, `StudyID` renumbered `STUDY_0001`..`0003`;
+- `check-anon-output.py --all-files` over the result: PASSED.
+
+Then the incremental cases, all on real data: a second run adding another patient left
+the first patient's 1293 files **byte-identical**; a lookup file trying to move a patient
+was refused by rule 1; and `Test-GBM-Sorted-2`, which really does contain two folders
+whose names both parse to the same patient ID, was refused. Under v0.7 those two folders
+would have been written into one anon folder without a word.
+
+**The problem the trial existed to find: every run rewrote everything.** A re-run with
+nothing changed still took 90 seconds and rewrote all 2049 files. Scaled to the real
+export that is roughly **nine hours and 301 GB rewritten every time the oncologist adds
+one session**, which makes the incremental workflow unusable in practice even though it
+is correct.
+
+The state already recorded each written path against the version that wrote it, so the
+fix was to skip a file already present at the current `TOOL_VERSION`. The same re-run now
+takes **0 seconds**. Adding new data still processes normally, which `test_longitudinal`
+covers, and a version change still forces the whole folder to be produced again because
+`stale_files` compares against the recorded version rather than mere presence.
+
+Found alongside it: `valid_file_count` in the mapping file was accumulated with `+=` on
+every run, so re-processing a patient inflated it without limit. It is now set from
+`len(state['files'])`, the true total, and the counts match the files on disk exactly.
+
+Not a defect but worth knowing: because the birth date is reduced to 1 January of its
+shifted year, an age derived from the output dates can differ from the stored
+`PatientAge` by up to a year. That artefact predates v0.8, which reduced to 1 January of
+the real year, so it is unchanged behaviour rather than a regression.
 
 ### 2026-08-13: the export measured, and what it actually shows
 

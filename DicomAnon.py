@@ -529,6 +529,7 @@ class DicomAnonWidget(QWidget):
             for patient_dir_idx,patient_dir in enumerate(patient_dirs_l):
                 valid_file_count = 0
                 invalid_file_count = 0
+                skipped_file_count = 0
                 try:
                     patient_id = self._parse_patient_id(patient_dir)
                 except Exception as e:
@@ -577,6 +578,18 @@ class DicomAnonWidget(QWidget):
                 for source_file in dicom_files:
                     rel_path = os.path.relpath(source_file, patient_full_dir)  # use the same relative path for source and target
                     anon_patient_file = anon_patient_dir + os.sep + rel_path   # add the relative path to the anon directory
+                    # Already written by this version, so writing it again would produce
+                    # the same bytes. Skipping matters at the scale this runs at: without
+                    # it, adding one session rewrites the entire delivery, which measured
+                    # at roughly nine hours and 301 GB for the real export.
+                    if (state['files'].get(rel_path) == TOOL_VERSION
+                            and os.path.isfile(anon_patient_file)):
+                        skipped_file_count += 1
+                        dicom_files_processed += 1
+                        if dicom_files_count > 0:
+                            self.pbar.setValue(int(dicom_files_processed / dicom_files_count * 100))
+                        QApplication.processEvents()
+                        continue
                     # load and process the file
                     try:
                         ds = dcmread(source_file)
@@ -637,14 +650,16 @@ class DicomAnonWidget(QWidget):
                 # add or update the mapping
                 date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 if new_patient:
-                    row = pd.Series({'patient_id':patient_id, 'anon_patient_dir_name':anon_patient_folder_name, 'total_session_count':session_count, 'valid_file_count':valid_file_count, 'invalid_file_count':invalid_file_count, 'last_updated':date_str, 'date_offset_days':offsets[0], 'time_offset_seconds':offsets[1]})
+                    row = pd.Series({'patient_id':patient_id, 'anon_patient_dir_name':anon_patient_folder_name, 'total_session_count':session_count, 'valid_file_count':len(state['files']), 'invalid_file_count':invalid_file_count, 'last_updated':date_str, 'date_offset_days':offsets[0], 'time_offset_seconds':offsets[1]})
                     mapping_df = pd.concat([mapping_df, pd.DataFrame([row], columns=row.index)]).reset_index(drop=True)
                 else:
                     row_index = mapping_df.loc[mapping_df['patient_id'] == patient_id].index[0]
                     mapping_df.loc[row_index, 'total_session_count'] = session_count
                     mapping_df.loc[row_index, 'last_updated'] = date_str
-                    mapping_df.loc[row_index, 'valid_file_count'] += valid_file_count
-                    mapping_df.loc[row_index, 'invalid_file_count'] += invalid_file_count
+                    # set, not add: this used to accumulate, so every re-run inflated
+                    # the count. state['files'] is the true total across all runs.
+                    mapping_df.loc[row_index, 'valid_file_count'] = len(state['files'])
+                    mapping_df.loc[row_index, 'invalid_file_count'] = invalid_file_count
                     mapping_df.loc[row_index, 'date_offset_days'] = offsets[0]
                     mapping_df.loc[row_index, 'time_offset_seconds'] = offsets[1]
                 # save as each patient finishes, not just at the end of the run. The
