@@ -11,8 +11,14 @@ After telling DicomAnon where you want the anonymised files to be placed, it wil
 The DICOM files are anonymised by blanking the values of the following DICOM tags:
 
 ### Patient
-* PatientName - replaced with `Brain-<anon_patient_ID>`
-* PatientID - replaced with `Brain-<anon_patient_ID>`
+* PatientName - replaced with the anonymised ID you assigned this patient in the [ID lookup file](#the-id-lookup-file)
+* PatientID - replaced with the same anonymised ID
+
+DicomAnon does not invent these values or add any prefix to them. Whatever you put in the
+second column of the lookup file is written into both tags exactly as it appears there, and is
+also used as the patient's folder name in the output. So a lookup row giving `Brain-0001`
+produces a `Brain-0001` folder containing files whose `PatientName` and `PatientID` are both
+`Brain-0001`. If you use a different naming convention, that is what you will get.
 
 ### Patient (except PatientName, PatientID)
 * OtherPatientIDs
@@ -156,11 +162,13 @@ The file needs two columns, with a header row:
 
 | Patient ID | Anonymised ID |
 | ---------- | ------------- |
-| 1234       | 001           |
-| 5678       | 002           |
+| 1234       | Brain-0001    |
+| 5678       | Brain-0002    |
 
 * **The first column** holds the real patient ID - the number at the start of each patient folder name. For a folder named `1234_SmithJohn`, the ID is `1234`.
-* **The second column** holds the anonymised ID you want to use for that patient. This value becomes the patient's folder name in the destination folder, and the patient's `PatientName` and `PatientID` tags are set to `Brain-<anonymised ID>`.
+* **The second column** holds the anonymised ID you want to use for that patient. You choose it; DicomAnon uses it verbatim and adds nothing to it. The same value becomes the patient's folder name in the destination folder **and** the value of their `PatientName` and `PatientID` tags.
+
+`Brain-0001` above is only the convention this project happens to use, not something DicomAnon requires or supplies. Whatever you write is what appears in the files, so pick the convention you want before the first run: an anonymised ID cannot be changed afterwards, as described below.
 
 The column *names* do not matter - DicomAnon reads the first and second columns by position, so anything in a third or later column is ignored.
 
