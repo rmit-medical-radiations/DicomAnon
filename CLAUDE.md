@@ -176,6 +176,30 @@ used to `break`, abandoning every remaining patient while still saving the mappi
 those already done. It now collects those folders, reports them in one dialog and carries
 on, the way an unknown patient ID already did.
 
+#### The folder name still decides; the PatientID now checks it
+
+Worth stating plainly, because the merge change makes it easy to assume otherwise:
+**the anonymised folder is still chosen from the source folder's NAME.** The name is
+parsed for the numeric ID, the lookup file is keyed on it, and that decides where the
+files go. The DICOM `PatientID` is never used to choose a destination.
+
+What it is used for is checking that decision. That left a gap: a folder named for one
+patient but filled entirely with another's files was accepted in silence, because every
+file in it agreed with every other and nothing conflicted. Demonstrated, not theorised: a
+folder named `1234_...` containing only patient 9999's files was written into 1234's
+anonymised identity with no warning at all.
+
+`compare_patient_id` now compares the two per file and stops the run when they differ.
+Measured first on the local exports: across all six source folders the folder-name ID and
+the `PatientID` inside agree exactly, so the export script derives the folder name from
+the DICOM and the check is safe to enforce.
+
+It only compares when the `PatientID` is numeric, and reports rather than blocks when it
+is not. A site that prefixes or pads its IDs would otherwise be stopped on every file,
+which is the mistake the duplicate-folder check made and worth not repeating. The
+compromise leaves a hole, a non-numeric `PatientID` that disagrees, and that hole is
+visible in the end-of-run warnings rather than silent.
+
 #### A UI element that is not a UID
 
 The run warned about `(2005,1395)` holding

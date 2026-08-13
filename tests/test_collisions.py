@@ -114,4 +114,25 @@ print('\n=== a folder the lookup never names causes no false stop ===')
 out, err = attempt('colliding patient not in the lookup', DIFF, ['5678'], ['Brain-0005'])
 assert err is None, err
 
-print('\nmerge and collision handling correct')
+
+print('\n=== a folder named for one patient but filled with another\'s files ===')
+MISNAMED = os.path.abspath('misnamed')
+write(MISNAMED, '1234_SmithJohn', '9999', '20210801', 'a.dcm')   # name says 1234
+out, err = attempt('folder name disagrees with the PatientID', MISNAMED,
+                   ['1234'], ['Brain-0006'])
+assert err, "a misnamed folder was accepted, filing one patient under another's identity"
+print('    {}'.format(err.splitlines()[0][:110]))
+assert not any(f.endswith('.dcm') for _, _, fs in os.walk(out) for f in fs), \
+    'files were written before the mismatch was noticed'
+print('    nothing was written')
+
+print('\n=== a non-numeric PatientID is reported, not blocked ===')
+ODD = os.path.abspath('odd')
+write(ODD, '4321_Odd^Format', 'MRN-4321', '20210801', 'a.dcm')
+out, err = attempt('PatientID that cannot be compared', ODD, ['4321'], ['Brain-0007'])
+assert err is None, err
+notes = w.verifier.problems()
+assert any('could not be checked' in p for p in notes), notes
+print('    warned: {}'.format(notes[0][:100]))
+
+print('\nmerge, collision and folder-name handling correct')

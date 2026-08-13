@@ -551,6 +551,29 @@ def check_lookup(pairs):
     return problems
 
 
+def compare_patient_id(folder_patient_id, dicom_patient_id):
+    """How a folder's ID relates to the PatientID inside its files.
+
+    The folder name decides which anonymised folder a patient is written to, and the
+    lookup file is keyed on it, so a misnamed folder sends a patient to somebody else's
+    identity. The PatientID in the files is the second, independent witness to who they
+    are, and comparing the two is what turns a naming mistake into a caught error rather
+    than a silent one.
+
+    Returns 'match', 'differ' or 'incomparable'. Only a numeric PatientID is compared,
+    numerically, so a site that prefixes its IDs or pads them differently is reported
+    rather than blocked: refusing a run on a format nobody has seen would repeat the
+    mistake the duplicate-folder check made.
+    """
+    dicom = str(dicom_patient_id or '').strip()
+    if not dicom or not dicom.isdigit():
+        return 'incomparable'
+    try:
+        return 'match' if int(dicom) == int(folder_patient_id) else 'differ'
+    except (TypeError, ValueError):
+        return 'incomparable'
+
+
 def check_assignments(lookup, recorded):
     """Rule 1: a patient's anon folder, once assigned, is permanent.
 
@@ -702,6 +725,7 @@ class RunVerifier:
         self.folders_by_source = collections.defaultdict(set)
         self.sources_by_folder = collections.defaultdict(collections.Counter)
         self.identities = collections.defaultdict(collections.Counter)
+        self.unmatched_ids = set()
         self.files = 0
 
     def record(self, source_patient_id, anon_folder, birth_year='', sex=''):
@@ -732,6 +756,15 @@ class RunVerifier:
         if birth_year or sex:
             self.identities[anon_folder][(birth_year, sex)] += 1
         return problem
+
+    def note_unmatched_id(self, folder_patient_id, dicom_patient_id):
+        """A folder whose ID could not be compared with the PatientID in its files.
+
+        Reported at the end rather than stopping the run, because an ID format this code
+        cannot parse is not evidence of anything being wrong, only that the strongest
+        check could not run.
+        """
+        self.unmatched_ids.add((str(folder_patient_id), str(dicom_patient_id)))
 
     def contaminated_folders(self):
         """Anon folders that received files from more than one source patient."""
@@ -774,6 +807,11 @@ class RunVerifier:
             problems.append(
                 'source patient {} was written to {} anon folders: {}'.format(
                     source, len(folders), ', '.join(folders)))
+        for folder_id, dicom_id in sorted(self.unmatched_ids):
+            problems.append(
+                'source folder {} holds files whose PatientID is {!r}, which is not a '
+                'number and could not be checked against the folder name'.format(
+                    folder_id, dicom_id))
         for folder, identities in self.mixed_identities().items():
             problems.append(
                 'anon folder {} holds more than one birth year or sex: {}'.format(

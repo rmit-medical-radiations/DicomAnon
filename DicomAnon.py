@@ -14,6 +14,7 @@ from pydicom.multival import MultiValue
 from anon_checks import (IDENTIFYING_KEYWORDS, TOOL_VERSION, RunVerifier,
                          blank_identifying_tags,
                          VerificationError, check_assignments, check_lookup,
+                         compare_patient_id,
                          load_patient_state, new_offsets, new_patient_state,
                          recorded_owners, save_patient_state, shift_dates,
                          snapshot_source, stale_files, state_dir_for,
@@ -666,6 +667,24 @@ class DicomAnonWidget(QWidget):
                                 'stopped before this file was written.\n\n'
                                 'Source file:\n{}\n\nProblems:\n{}'.format(
                                     source_file, '\n'.join('  - ' + p for p in problems)))
+                        # The folder name decides where this file goes; the PatientID
+                        # inside it is the independent witness to whose it is. A folder
+                        # named for one patient but filled with another's files would
+                        # otherwise be accepted in silence, since every file in it agrees
+                        # with every other and nothing conflicts.
+                        verdict = compare_patient_id(patient_id, source['patient_id'])
+                        if verdict == 'differ':
+                            raise VerificationError(
+                                'Source folder {} is named for patient {}, but this file '
+                                'says it belongs to patient {}.\n\nSource file:\n{}\n\n'
+                                'Anonymising it would file {}\'s data under the identity '
+                                'given to {}. Check whether the folder is named correctly '
+                                'before processing it.'.format(
+                                    ', '.join(source_dirs), patient_id,
+                                    source['patient_id'], source_file,
+                                    source['patient_id'], patient_id))
+                        if verdict == 'incomparable' and source['patient_id']:
+                            self.verifier.note_unmatched_id(patient_id, source['patient_id'])
                         # the source PatientID is what makes this a real contamination
                         # check rather than the birth year proxy the university is stuck with
                         contamination = self.verifier.record(
