@@ -24,13 +24,23 @@ pseudonyms are stable between runs and scoped to one patient. `TOOL_VERSION` is 
 per patient, and a run stops rather than mixing versions in one folder or writing into a
 destination it has no record of.
 
-**All seven defects are now addressed.** The remaining work is deployment and
-measurement, not analysis. Two consequences worth stating plainly:
+**2026-08-13: the export has been measured, and 18 of its 33 folders hold data from two
+different people.** Confirmed assignment drift, exactly as defect 4 predicted. See the
+decision log. **The export cannot be repaired in place and must be rebuilt from source.**
 
-- **The existing export has to be rebuilt.** It has no state, so the tool will refuse to
-  add to it, by design. It also predates every fix: real times, a recoverable 30-day
-  shift, unstable UIDs, and the 33% of series still in a 2025-era state.
-- **Nothing here has run against real data.** Every test is synthetic fixtures.
+**2026-08-13: defects 8 and 9 fixed**, both found by simulating messy real DICOM. A file
+with no `StudyInstanceUID` would have halted an entire run, and identifying tags nested
+in sequences were never blanked, with the verification blind to it because it used the
+same top-level test as the blanking.
+
+**All nine defects are now addressed.** The remaining work is deployment and the rebuild,
+not analysis. Two things to keep in view:
+
+- **The existing export has to be rebuilt**, both because of the contamination above and
+  because the tool now refuses to add to a destination it has no state for.
+- **v0.8 has never run against real DICOM.** The tests are synthetic, and defects 8 and 9
+  are a fair warning about what a first real run may turn up. Run it over one patient
+  before committing to the full rebuild.
 
 **2026-08-13: DicomAnon now verifies every file it writes and stops the run on failure**,
 including the check that an anon folder only ever receives one source patient, which is
@@ -57,22 +67,23 @@ patient whose folder it landed in.
 
 Next, in this order:
 
-1. **Run `check-anon-output.py` against the export copy on the university server.**
-   Needs nobody else, and it is the first real measurement of how bad the existing
-   export is. `check_identity` in `gbm-mrlinac`'s `check-patient-integrity.py` already
-   does the birth year and sex part there and should keep being run.
-2. **Release v0.8 and get the researcher onto it**, so no further unguarded output is
-   produced. Every run until then has none of these checks.
-3. **Plan the rebuild.** The existing export cannot be added to and has to be
-   reprocessed from source into a fresh destination. Worth confirming the hospital still
-   holds the source for all 33 patients before promising anything downstream, because
-   any patient whose source is gone cannot be brought up to the current version at all.
-4. **Duplicate `anon_patient_dir_name` in `dicom-anon-mapping.xlsx`**, which settles
-   path B on its own and needs no DICOM reads. The file is in the researcher's home
-   folder at the hospital, so this one needs them to send it.
-5. **Ask the hospital programmer what their export script groups files by.** Now that
-   the in-app check exists, this decides what the failure dialogs will actually mean
-   when they fire, and whether a source folder can legitimately hold two patient IDs.
+1. **Stop using the current export for anything patient-level.** 18 of 33 folders mix two
+   people, so per-patient metrics and anything longitudinal are invalid for them, and
+   which 18 is known but which patient is in which folder is not.
+2. **Get the ID mapping spreadsheet from the hospital.** It records the folder each
+   patient was assigned and is the cheapest way to confirm the drift and recover the
+   correct attribution. Duplicate `anon_patient_dir_name` values settle it outright.
+3. **Run the pixel hashing** in `gbm-mrlinac`'s `check-patient-integrity.py --check
+   duplicates`. It is the only thing that can attribute series to patients now that the
+   identifiers are gone, and it also measures defect 2's cross-run duplicates.
+4. **Release v0.8, then trial it on one patient** into an empty destination before
+   committing to a full rebuild. Defects 8 and 9 are what a first contact with real data
+   looks like, and there will be more.
+5. **Rebuild the delivery from source.** Confirm first that the hospital still holds
+   source for all 33 patients; any patient whose source is gone cannot be brought up to
+   the current version at all.
+6. **Ask the hospital programmer what their export script groups files by**, which
+   decides what the new failure dialogs will mean when they fire.
 
 Smaller things noted and not done: per-file orphan detection (a file deleted from the
 source stays in the destination unnoticed), and the two loop bugs from the defect 6
@@ -114,6 +125,89 @@ v0.3 and earlier still carry hand-uploaded assets. They predate the GitHub
 Actions builds and have not been checked against this bug.
 
 ## Decision log
+
+### 2026-08-13: the export measured, and what it actually shows
+
+First run of `check-anon-output.py` against the real export (local copy of `GBM-SP`,
+33 folders, 761631 files, 22857 series directories sampled). **Nothing below contains
+patient data; this file is in a public repository. The report JSON does contain real
+birth dates and was deliberately not committed.**
+
+**The headline: 18 of 33 folders hold data from two different people.** Not a
+suspicion, a measurement.
+
+The mechanism is defect 4's assignment drift, and the evidence took two passes to read
+correctly. The first pass compared birth year and sex per folder and found 15 identities
+apparently spanning several folders, which looked like patients smeared across the
+export. That reading was wrong: with 33 patients and only 24 distinct (year, sex) pairs,
+collisions are guaranteed by pigeonhole, and some of those matches were coincidence.
+
+The second pass used the **full** birth dates that stale files still carry, which is a
+far stronger identifier, and it inverted the picture:
+
+- folders containing more than one real birth date: **0**
+- folders containing more than one anonymised birth year: **0**
+
+Every folder holds exactly one identity of each kind. They are simply **different
+identities**. In 18 folders the stale files belong to one patient and the current files
+belong to another. Four folders are internally consistent, and eleven have no stale
+files at all, having been written entirely by the newer build.
+
+The affected folders form a chain: the current files in one folder match the real
+patient whose stale files sit in the previous affected folder, skipping exactly the
+folders that are internally consistent. A permutation that orderly is not a coincidence.
+It is the lookup file's assignment changing between runs, precisely as defect 4
+predicted: the patient was written to their new folder, the old copy stayed where it
+was, and nothing warned.
+
+Two things follow.
+
+**Rule 1 is confirmed as the fix, empirically rather than by argument.** An immutable
+patient-to-folder assignment would have stopped the run that caused this.
+`check_assignments` now does exactly that.
+
+**The exact per-folder attribution is still unknown.** Birth year and sex cannot resolve
+which specific patient is in which folder, because the years collide. Resolving it needs
+either the ID mapping spreadsheet from the hospital, or the pixel hashing in
+`check-patient-integrity.py`. Do not attempt to repair the export folder by folder from
+year matching; rebuild from source instead.
+
+Also measured: 9710 sampled files still carry a real birth date, a raw `StudyID` and
+populated identifying tags, across 22 of 33 folders. The tags most often left populated
+were `EthnicGroup`, `PatientAddress`, `PatientMotherBirthName`,
+`ReferringPhysicianAddress` and `ReferringPhysicianName`, each in 9710 files. Every
+entry in `IDENTIFYING_KEYWORDS` is now a valid DICOM keyword, and no folder contained a
+file labelled for another folder.
+
+### 2026-08-13: defects 8 and 9, found by simulating messy data
+
+Prompted by asking what would happen when v0.8 first meets real hospital DICOM rather
+than clean fixtures. Both were found in minutes by building the awkward cases by hand,
+and both would have mattered on the first real run.
+
+**Defect 8: one non-conformant file would halt an entire run.** `_get_study_label`
+returns the bare string `STUDY` when a file has no `StudyInstanceUID`, which fails
+`verify_file`'s `STUDY_\d+$` assertion. Since v0.8 stops the run on any verification
+failure, a single odd file would have blocked the researcher with no way forward. Now
+returns `STUDY_0000`, a reserved label that groups such files without implying they are
+one study.
+
+**Defect 9: identifying tags nested in sequences were never blanked, and the check was
+blind to it.** The blanking used `if kw in ds`, which only inspects the top level, so an
+`InstitutionName` or `ReferringPhysicianName` inside `RequestAttributesSequence` or
+`OriginalAttributesSequence` survived. Real hospital data puts them in both places.
+
+The worse half is that `verify_file` used **the same top-level test**, so it agreed with
+the bug instead of catching it. A check written from the implementation can only confirm
+what the implementation already does; it has to be written from the property. Both now
+walk: `blank_identifying_tags` and `populated_identifying_tags`.
+
+This is the same shape as defect 7 and the same lesson as defect 1: the UID handling
+walked recursively from the start, and everything modelled on it was correct, while
+everything that used a flat keyword test was quietly wrong.
+
+`tests/test_messy.py` covers both, plus truncated dates, whitespace-only times, empty
+sequences and private tags nested in sequences.
 
 ### 2026-08-13: defects 2, 3 and 4, and the state store they all needed
 

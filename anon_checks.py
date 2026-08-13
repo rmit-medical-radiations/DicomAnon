@@ -249,6 +249,42 @@ def shift_moment(date_text, time_text, offset_days, offset_seconds):
             '{}.{}'.format(shifted_time, frac) if frac else shifted_time)
 
 
+def blank_identifying_tags(ds):
+    """Blank every identifying tag, including inside nested sequences.
+
+    The tags are looked up by keyword, but the walk is by traversal, so a keyword
+    appearing inside RequestAttributesSequence or OriginalAttributesSequence is caught
+    as well as one at the top level. Real hospital data puts them in both.
+    """
+    for elem in ds:
+        if elem.VR == 'SQ':
+            for item in elem.value or []:
+                blank_identifying_tags(item)
+            if elem.keyword in IDENTIFYING_KEYWORDS:
+                elem.value = []
+        elif elem.keyword in IDENTIFYING_KEYWORDS:
+            elem.value = ''
+
+
+def populated_identifying_tags(ds):
+    """Identifying tags that still hold a value anywhere in the dataset.
+
+    Walks the same way blank_identifying_tags does. The previous version of this check
+    used `kw in ds`, the same top-level test the blanking used, so it could only ever
+    confirm what the blanking had already done and was blind to everything it missed.
+    """
+    found = set()
+    for elem in ds.iterall():
+        if elem.keyword in IDENTIFYING_KEYWORDS:
+            value = elem.value
+            if elem.VR == 'SQ':
+                if value:
+                    found.add(elem.keyword)
+            elif value is not None and str(value).strip():
+                found.add(elem.keyword)
+    return sorted(found)
+
+
 def _pair_keyword(keyword):
     """The TM element that partners a DA element, by name.
 
@@ -376,8 +412,7 @@ def verify_file(ds, snapshot, anon_name, check_dates=True):
     if study_id and not STUDY_ID_RE.match(study_id):
         problems.append('StudyID {!r} is not a STUDY_nnnn pseudonym'.format(study_id))
 
-    populated = sorted(kw for kw in IDENTIFYING_KEYWORDS
-                       if kw in ds and str(ds.data_element(kw).value or '').strip())
+    populated = populated_identifying_tags(ds)
     if populated:
         problems.append('identifying tags still populated: {}'.format(
             ', '.join(populated)))

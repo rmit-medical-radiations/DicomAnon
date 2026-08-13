@@ -12,6 +12,7 @@ from pydicom.dataset import Dataset
 from pydicom.uid import generate_uid
 from pydicom.multival import MultiValue
 from anon_checks import (IDENTIFYING_KEYWORDS, TOOL_VERSION, RunVerifier,
+                         blank_identifying_tags,
                          VerificationError, check_assignments, check_lookup,
                          load_patient_state, new_offsets, new_patient_state,
                          recorded_owners, save_patient_state, shift_dates,
@@ -177,7 +178,11 @@ class DicomAnonWidget(QWidget):
         """
         study_uid = getattr(ds, "StudyInstanceUID", None)
         if not study_uid:
-            return "STUDY"
+            # A file with no StudyInstanceUID still needs a label matching STUDY_nnnn,
+            # or verify_file rejects it and one non-conformant file halts the whole run.
+            # They are grouped together under a single reserved label rather than being
+            # given a number that would imply they are one study.
+            return "STUDY_0000"
         if study_uid not in study_label_map:
             idx = len(study_label_map) + 1
             study_label_map[study_uid] = f"STUDY_{idx:04d}"
@@ -230,14 +235,12 @@ class DicomAnonWidget(QWidget):
         ds.StudyID = study_label
         # ds.StudyDescription is intentionally NOT modified
 
-        # blank other identifying tags
-        for kw in IDENTIFYING_KEYWORDS:
-            if kw in ds:
-                elem = ds.data_element(kw)
-                if elem.VR == "SQ":
-                    elem.value = []
-                else:
-                    elem.value = ""
+        # blank other identifying tags, at every level. `if kw in ds` only ever looked at
+        # the top level, so an InstitutionName or ReferringPhysicianName inside
+        # RequestAttributesSequence or OriginalAttributesSequence survived untouched, and
+        # verify_file used the same top-level test so it agreed with the bug rather than
+        # catching it. Both now walk (defect 9).
+        blank_identifying_tags(ds)
 
         # pseudonymise UIDs (dataset and nested sequences)
         self._anonymise_uids_recursive(ds, uid_map)
