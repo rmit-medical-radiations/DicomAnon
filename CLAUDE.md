@@ -139,6 +139,38 @@ Actions builds and have not been checked against this bug.
 
 ## Decision log
 
+### 2026-08-13: pydicom moved to 3.0.2, and TOOL_VERSION deliberately not bumped
+
+`requirements.txt` pinned `pydicom==2.4.3` while every real-data trial had been run
+against 3.0.2 on a developer machine. The shipped build therefore had only synthetic
+coverage, and the version that had processed 45359 real files was not the one users got.
+That is the wrong way round, so the pin moved to 3.0.2, the current release.
+
+**The output is byte-identical between the two.** Measured, not assumed: 40 real Philips
+files anonymised under 2.4.2 and 3.0.2 with `generate_uid` monkeypatched to a
+deterministic counter, so the pydicom version was the only variable. Same aggregate
+SHA1, all 40 files identical byte for byte.
+
+The first attempt at this comparison was wrong and worth recording: it gave each version
+a fresh `uid_map`, so every UID was newly generated and every file differed by
+construction. The hashes disagreed and it looked like a real encoding difference. It was
+not. Control the randomness before concluding anything from a byte comparison.
+
+**So `TOOL_VERSION` stays at `0.8`.** Bumping it would be the reflex, since the rule is
+that a version change forces every patient's folder to be produced again. But that rule
+exists to stop two *different* anonymisations sharing a folder, and here the output is
+identical. Bumping would force a full reprocess of everything for no benefit, which is
+expensive and would train people to ignore the mechanism. Bump `TOOL_VERSION` when the
+bytes change, not when a dependency does.
+
+Also removed from both spec files: `hiddenimports=['pydicom.encoders.gdcm',
+'pydicom.encoders.pylibjpeg']`. Those modules do not exist in pydicom 3, which renamed
+the package to `pydicom.pixels`, and they were never needed in the first place: the app
+touches no pixel data, it passes it through as raw bytes.
+
+The two-version support in `tests/_fixtures.py` stays. It costs nothing and the pin will
+drift from developer machines again.
+
 ### 2026-08-13: full-size trial, and the numbers to plan the rebuild with
 
 Third trial, on the largest patient in the export (45359 files, 25 GB) staged as a source

@@ -1,4 +1,4 @@
-pydicom==2.4.3
+pydicom==3.0.2
 pandas==2.2.2
 PyQt6==6.6.1
 # PyQt6-Qt6 ships the Qt libraries themselves and is only loosely constrained by

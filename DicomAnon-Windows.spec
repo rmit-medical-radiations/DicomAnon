@@ -5,7 +5,10 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=['pydicom.encoders.gdcm', 'pydicom.encoders.pylibjpeg'],
+    # No pydicom codec hidden imports: the app never reads or writes pixel data,
+    # it passes it through as raw bytes. The old pydicom.encoders.* entries did
+    # not exist in pydicom 3 anyway, which renamed that package to pydicom.pixels.
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
