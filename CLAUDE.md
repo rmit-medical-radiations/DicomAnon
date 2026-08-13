@@ -43,8 +43,14 @@ not analysis. Two things to keep in view:
   run rewrote the entire destination, about nine hours for the real export. Re-runs with
   nothing changed are now instant. See the decision log.
 
-Still untried on real data: a patient with RT structure sets and registrations, which is
-where the persisted UID map earns its keep, and a full-size patient folder.
+**2026-08-13: trialled on a real RT patient too** (CT, MR, RTSTRUCT, RTPLAN, RTDOSE, REG),
+with the structure sets deliberately written by a later run than the images they contour.
+No reference was broken that was not already broken in the source. Noted along the way:
+2928 of 3603 references in the source's registration objects already dangle, which is a
+question for the hospital about what the export omits.
+
+Still untried on real data: a full-size patient folder (these were around 1 GB against
+roughly 9 GB per patient in the export).
 
 **2026-08-13: DicomAnon now verifies every file it writes and stops the run on failure**,
 including the check that an anon folder only ever receives one source patient, which is
@@ -129,6 +135,50 @@ v0.3 and earlier still carry hand-uploaded assets. They predate the GitHub
 Actions builds and have not been checked against this bug.
 
 ## Decision log
+
+### 2026-08-13: RT trial, the case the persisted UID map exists for
+
+Second trial, on the real RT patient in `Test-GBM-Sorted-1`: CT, MR, RTSTRUCT, RTPLAN,
+RTDOSE and REG, 756 files. Split deliberately across two runs, images first and the RT
+objects second, so the structure sets were written by a **later run** than the images
+they contour. That is defect 2's scenario exactly, and the one that produced the export's
+undetectable duplicates.
+
+Method: count references that resolve to nothing, in the source and in the output, and
+require the output to introduce none. A pre-existing dangling reference is the source's
+problem; a new one would be ours.
+
+| modality | references | dangling in source | dangling in output |
+|---|---|---|---|
+| RTSTRUCT | 164 | 0 | **0** |
+| RTDOSE | 35 | 0 | **0** |
+| RTPLAN | 18 | 0 | **0** |
+| REG | 3603 | 2928 | **2928** |
+| CT | 4 | 4 | 4 |
+| MR | 3 | 3 | 3 |
+
+Nothing broken that was not already broken, and no source UID present in the output. The
+structure sets written in run 2 resolve correctly to images anonymised in run 1, which
+only works because `uid_map` is persisted.
+
+**The REG figure is a finding about the source data, not about the tool.** 2928 of 3603
+references in the registration objects already point at instances that are not in the
+export, in the source. Anything downstream that resolves registrations by UID should
+expect that, and it is worth raising with the hospital: it suggests the export omits
+series the registrations were computed against.
+
+Also fixed here: the duplicate-patient-ID check was scanning **every** source folder,
+including ones the lookup never names. A source directory holding folders from another
+delivery would have halted the run for a patient that would have been skipped anyway.
+It now only considers folders the lookup actually names, covered by
+`tests/test_collisions.py`. Confirmed against `Test-GBM-Sorted-2`, which really does
+contain two folders whose names parse to the same ID: naming a different patient
+proceeds, naming the colliding one refuses.
+
+Performance note for the rebuild: run 2 took 76 seconds for 84 RT files. RTSTRUCT and REG
+carry thousands of sequence items, and `snapshot_source`, the anonymiser and `verify_file`
+each walk the whole dataset, so verification costs roughly three traversals per file.
+Acceptable, but RT objects are far slower per file than images.
 
 ### 2026-08-13: v0.8 trialled on real DICOM, and the rewrite problem it exposed
 

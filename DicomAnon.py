@@ -510,12 +510,17 @@ class DicomAnonWidget(QWidget):
         # Two source folders that parse to the same patient ID would be written into one
         # anon folder. Excel drops leading zeros, so the lookup file cannot even express
         # the difference between 0123_X and 123_Y; the collision has to be caught here.
+        # Only folders the lookup actually names can collide: one that is not in the
+        # lookup is skipped and never written, so halting the run for it would be a
+        # false stop on a source folder holding patients from another delivery.
         by_parsed_id = {}
         for name in patient_dirs_l:
             try:
-                by_parsed_id.setdefault(self._parse_patient_id(name), []).append(name)
+                parsed = self._parse_patient_id(name)
             except Exception:
                 continue  # reported per patient in the loop below
+            if str(parsed) in lookup_dict:
+                by_parsed_id.setdefault(parsed, []).append(name)
         collisions = {pid: names for pid, names in by_parsed_id.items() if len(names) > 1}
         if collisions:
             raise VerificationError(
