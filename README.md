@@ -3,10 +3,8 @@ This is a repository for a DICOM anonymiser, deftly named DicomAnon. Although th
 
 After telling DicomAnon where you want the anonymised files to be placed, it will preserve the folder structure and place anonymised DICOM files there. DicomAnon does not change the original files; it merely reads them, changes the value of DICOM tags that contain personal information about the patient, and writes the anonymised version to the designated destination folder.
 
-<img width="712" alt="DicomAnon screen shot" src="https://github.com/RMIT-University-Medical-Radiations/DicomAnon/assets/1016303/742f9e86-d083-413f-9635-909e5964eb2e">
+<img width="752" height="384" alt="image" src="https://github.com/user-attachments/assets/38d1d9bb-19c0-4239-818d-cec97df44bfd" />
 
-<!-- TODO: this screenshot predates the `ID lookup file` row and needs retaking. -->
-> **Note:** the screenshot above is out of date - it does not show the `ID lookup file` row that now sits below the source and destination folders.
 
 The DICOM files are anonymised by blanking the values of the following DICOM tags:
 
