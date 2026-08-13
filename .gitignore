@@ -1,9 +1,8 @@
-.ipynb_checkpoints
+# PyInstaller writes both of these on every build, locally and in CI
 build
 dist
-.DS_Store
+
+.ipynb_checkpoints
 .DS_Store
 __pycache__/
-
-# scratch output from running tests locally
 tests/__pycache__/
