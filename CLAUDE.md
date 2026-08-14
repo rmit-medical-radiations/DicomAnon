@@ -6,6 +6,11 @@ a `v*` tag (`.github/workflows/build-windows.yml`, `build-macos.yml`).
 
 ## Current status / next steps
 
+**2026-08-14: v0.12 released, with the mapping swap retry and the recovery path tested.**
+v0.11 went to the oncologist deliberately without the retry, because a retry that
+succeeds destroys the evidence and the cause was still unproven. v0.12 ships it now that
+the recovery around it is covered. See the decision log.
+
 **2026-08-13: defect 1 fixed and the date check turned on.** Every `DA`/`TM`/`DT`
 element is shifted, by a random per-patient offset stored in the ID mapping file rather
 than the hard-coded 30 days that anyone could read off GitHub. Intervals between a
@@ -138,6 +143,54 @@ v0.3 and earlier still carry hand-uploaded assets. They predate the GitHub
 Actions builds and have not been checked against this bug.
 
 ## Decision log
+
+### 2026-08-14: v0.11 shipped without the retry on purpose, and what v0.12 had to prove
+
+Worth recording because the reasoning is easy to mistake for an oversight. v0.11 was cut
+from `0ba762f` and sent to the oncologist **without** the `os.replace` retry, which
+landed 33 minutes later in `13f2f73`. That was deliberate: the retry addresses a theory
+about transient Windows file holders that no run has ever confirmed, and a retry that
+succeeds on the third attempt destroys the only chance of learning what was holding the
+file. After three wrong guesses, the signal was worth more than the convenience.
+
+**But v0.11 turned out to be a poor diagnostic build, which was not the intent.** Reading
+it back: the failure path is `except OSError as e`, and `e` is bound and never used. The
+message has a single `{}`, filled with the mapping file path, so **the WinError number
+never reaches the operator**, and error 32 (sharing violation, something genuinely has it
+open) and error 5 (access denied, permissions or a scanner) point at different causes.
+`VerificationError` routes to `_report_verification_failure`, not to the traceback
+handler, so nothing else captures it either. Beside that, `os.remove(tmp)` deletes the
+temporary spreadsheet, which was the artefact that produced the last diagnosis. So the
+build sent out to gather evidence discards the evidence for every theory, including the
+Excel one. Do not treat "it stops loudly" as "it reports usefully"; they are different
+properties and only the second one was needed here.
+
+Note also that "the spreadsheet was not open in Excel" is a recollection, not a
+measurement, and should not be leaned on. The message names Excel alongside OneDrive,
+backup tools and antivirus, ruling nothing in or out.
+
+**What v0.12 had to prove before the retry could ship.** The dialog tells the operator to
+rename the kept copy over the real file and run again. That sequence had never been
+executed by anything. `tests/test_recovery.py` now runs it end to end: the mapping swap
+fails mid-run, the patient's files are already written, the rename restores a readable
+mapping with the folder assignment and the offsets, and a later run adds a session with
+the run 1 files byte-identical and the real 31 day gap still 31 days in the output. That
+is exactly the timeline inconsistency the hospital incident would have caused.
+
+Three smaller claims the dialog makes, now asserted rather than assumed: the underlying
+OS error appears in the report; a failed save leaves an existing mapping undamaged, which
+is the whole point of writing to a temporary file and swapping; and the retry gives up,
+measured at 3.0 s for six attempts, since an unbounded loop in a windowed app looks to
+the operator exactly like the hang that started this.
+
+**The test was mutation-checked rather than trusted for going green.** Dropping the OS
+error from the message fails it, and restoring `os.remove(tmp)` on failure fails it too.
+That second mutation is precisely v0.11's shipped behaviour, so the test would have
+caught it. A green suite proves nothing until you have watched it go red.
+
+Useful detail confirmed while writing it: `_patient_offsets` reads the mapping file
+first and only falls back to the per-patient state, so renaming the kept copy into place
+restores the authoritative record rather than a second-best one. The two agree.
 
 ### 2026-08-13: the v0.10 crash, diagnosed from the file it left behind
 
