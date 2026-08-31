@@ -236,5 +236,27 @@ None of that is detectable afterwards from the anonymised files alone.
 
 DicomAnon keeps the previous version as `dicom-anon-mapping.xlsx.bak` each time it saves. If you think something is wrong with the file, do not correct it: ask first. An assignment that has already been used to write files cannot be changed after the fact.
 
-## Keep the mapping spreadsheet safe
-The mapping spreadsheet is the only record linking the real patient IDs to the anonymised ones, and the date offsets it holds are part of that key: with them, every shifted date can be turned back into the real one. Anyone with both the anonymised DICOM files and this spreadsheet can re-identify the patients, so store it according to your institution's requirements for identifiable data - not alongside the anonymised files you intend to share, and never copied to whoever receives those files.
+## Keep the mapping spreadsheet and the record folder safe
+Two things on your machine can re-identify the patients, and both must be handled as identifiable data:
+
+* **`dicom-anon-mapping.xlsx`** in your home folder. It is the only record linking the real patient IDs to the anonymised ones, and the date offsets it holds are part of that key: with them, every shifted date can be turned back into the real one.
+* **the `.dicom-anon-state` folder** in your home folder. It holds real patient IDs and the map from real UIDs to anonymised ones, for every patient in every delivery.
+
+Anyone holding the anonymised DICOM files together with either of these can re-identify the patients. Store both according to your institution's requirements for identifiable data - not alongside the anonymised files you intend to share, and never copied to whoever receives those files.
+
+### Backing them up, and surviving a rebuilt machine
+Both live in your home folder, which is exactly what a Windows upgrade or a machine replacement wipes. Neither can be reconstructed afterwards, and without them the deliveries already sent cannot be added to. Back up:
+
+| what | Windows | macOS |
+|---|---|---|
+| the record folder, including everything inside it | `C:\Users\<you>\.dicom-anon-state\` | `~/.dicom-anon-state/` |
+| the mapping spreadsheet and its backup | `C:\Users\<you>\dicom-anon-mapping.xlsx` and `.xlsx.bak` | the same names in your home folder |
+| a leftover `dicom-anon-mapping.xlsx.tmp.xlsx`, **if one is there** | same folder | same folder |
+
+A leftover `.tmp.xlsx` means a save failed at some point and it may be the only up-to-date copy of the mapping. Do not delete it, and do not let a rebuild take it.
+
+Wherever you put the backup, it is identifiable data and the paragraph above applies to it. If that is a synced folder such as OneDrive, treat it as a **backup only**: copy the files back into your home folder before running DicomAnon, rather than working from inside the synced folder, because a program that syncs files in the background can hold the mapping spreadsheet open at the moment DicomAnon needs to replace it.
+
+**Write down the full path of your anonymised output folder as well.** The record folder is tied to that exact path. If the output folder ends up somewhere different after a rebuild, even by a drive letter, DicomAnon will not recognise it and will refuse to add to it.
+
+To check a restore worked, run DicomAnon over the same source and output folders with nothing changed. It should finish in seconds and write nothing. If it starts processing everything again, or says the output folder contains data it has no record of, the record folder has not been restored: stop and put it back before running anything else.
