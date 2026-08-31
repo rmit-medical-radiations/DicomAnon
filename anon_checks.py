@@ -39,7 +39,12 @@ from pydicom.datadict import tag_for_keyword
 # every patient's folder to be produced again, so it must only change when the output
 # actually changes: v0.9 moved pydicom from 2.4.3 to 3.0.2 and left this at 0.8, because
 # the two versions were measured to write byte-identical files.
-TOOL_VERSION = '0.8'
+#
+# 0.9: the per-file date carry. A bare DA, one with no TM beside it, now moves by
+# offset_days plus the file's carry instead of offset_days alone, so files written
+# before this differ by a day in those elements whenever the offset wrapped past
+# midnight. The bytes changed, so this changes with them.
+TOOL_VERSION = '0.9'
 
 STUDY_ID_RE = re.compile(r'STUDY_\d+$')
 
@@ -165,10 +170,10 @@ def shift_da(value, offset_days):
 def shift_tm(value, offset_seconds):
     """HHMMSS[.ffffff], shifted within the day, fractional seconds preserved.
 
-    Wrapping past midnight without touching the accompanying date is a known
-    imprecision: DA and TM are separate elements and pairing them reliably is not
-    possible. The offset is constant, so intervals between two times survive except
-    across the single wrap point, which is what the longitudinal analysis needs.
+    Only reached for a TM with no DA beside it: shift_dates pairs the two and shifts
+    them as one instant wherever it can, so this is the leftover case. Such a time wraps
+    within its day, having no date of its own to carry. The offset is constant, so
+    intervals between two times survive except across the single wrap point.
     """
     text = str(value).strip()
     if not text:
@@ -213,19 +218,23 @@ def shift_dt(value, offset_days, offset_seconds):
     return out + zone
 
 
-def shift_text_dates(text, offset_days, offset_seconds=0):
+def shift_text_dates(text, offset_days, offset_seconds=0, carry=0):
     """Shift a date or timestamp embedded in free text.
 
     SeriesDescription carried a full timestamp on 2% of the series in the export, e.g.
     '20210819134732-1ABrain'. Shifting it keeps the description readable and keeps its
     ordering, while removing the lookup key. Only runs that parse as a real date are
     touched, so an eight digit accession number is left alone.
+
+    A fourteen digit run is a whole instant and shifts exactly. An eight digit run is a
+    bare date with no time to carry it past midnight, so it takes the file's carry, the
+    same as any other bare DA. See _reference_carry.
     """
     def replace(match):
         run = match.group(1)
         if len(run) == 14:
             return shift_dt(run, offset_days, offset_seconds) or run
-        return shift_da(run, offset_days) or run
+        return shift_da(run, offset_days + carry) or run
 
     return EMBEDDED_DATE_RE.sub(replace, str(text))
 
@@ -300,14 +309,89 @@ def _pair_keyword(keyword):
     return keyword.replace('Date', 'Time') if 'Date' in keyword else None
 
 
-def shift_dates(ds, offset_days, offset_seconds):
+def _seconds_of_day(value):
+    """A DICOM TM as seconds past midnight, or None if it will not parse as a real time."""
+    head = str(value).strip().partition('.')[0]
+    if not head.isdigit() or len(head) not in (2, 4, 6):
+        return None
+    head = head.ljust(6, '0')
+    hours, minutes, seconds = int(head[0:2]), int(head[2:4]), int(head[4:6])
+    if hours > 23 or minutes > 59 or seconds > 60:
+        return None
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _reference_carry(ds, offset_seconds):
+    """How many days this file's bare dates move, on top of the whole-day offset.
+
+    A DA with a TM beside it is shifted as one instant, so its date carries past
+    midnight by itself. A DA with no TM has no instant to carry it, and shifting it by
+    whole days alone left it a day behind its own file whenever the time offset wrapped:
+    four dates identical in the source came out as two pairs a day apart, and a date
+    paired in one session and bare in the next lost a day from the interval between
+    them. The carry is therefore decided ONCE per file, from a single reference time,
+    and applied to every bare date in it, sequences included.
+
+    StudyTime is the reference because it anchors the study timeline and was present on
+    every series in the real export. Failing that, the first other TM in tag order, then
+    the time inside a DT. A file with no time at all has nothing to reason from and
+    keeps the old whole-day behaviour.
+
+    Note what this does NOT fix: two studies whose times of day fall either side of the
+    wrap still get different carries, so a gap measured from dates alone can differ by a
+    day from the source. The instant is exact in both, and differencing date with time
+    recovers the true interval. Fixing that would mean giving up either the time shift
+    or a file agreeing with itself.
+    """
+    study_time = first_time = first_datetime = None
+    for elem in ds:
+        values = _values(elem)
+        if not values:
+            continue
+        if elem.VR == 'TM':
+            seconds = _seconds_of_day(values[0])
+            if seconds is None:
+                continue
+            if elem.keyword == 'StudyTime':
+                study_time = seconds
+            elif first_time is None:
+                first_time = seconds
+        elif elem.VR == 'DT' and first_datetime is None:
+            body = str(values[0]).strip().partition('.')[0]
+            for sign in ('+', '-'):
+                index = body.find(sign, 8)
+                if index != -1:
+                    body = body[:index]
+                    break
+            if len(body) > 8 and body.isdigit():
+                first_datetime = _seconds_of_day(body[8:14].ljust(6, '0'))
+
+    for reference in (study_time, first_time, first_datetime):
+        if reference is not None:
+            # Floor division so a negative time offset carries backwards just as
+            # cleanly. shift_moment gets the same answer from timedelta arithmetic.
+            return (reference + offset_seconds) // 86400
+    return 0
+
+
+def shift_dates(ds, offset_days, offset_seconds, carry=None):
     """Shift every DA, TM and DT element in the dataset and its sequences (defect 1).
 
     Walks by VR deliberately. The previous behaviour shifted StudyDate alone, which was
     worse than shifting nothing: SeriesDate sat beside it unshifted, so differencing the
     two recovered the offset and undid it everywhere. Either shift the whole timeline or
     do not pretend to.
+
+    Bare dates, the ones with no TM beside them, move by offset_days plus the file's
+    carry rather than by offset_days alone, so that every date in a file moves together
+    even when the time offset wraps past midnight. See _reference_carry. The carry is
+    computed once at the top level and passed down, because a sequence item holding a
+    bare date and no time of its own has nothing to compute it from.
     """
+    if carry is None:
+        carry = _reference_carry(ds, offset_seconds)
+    date_offset_days = offset_days + carry
+
     by_keyword = {}
     for elem in ds:
         if elem.VR in DATE_VRS and elem.keyword:
@@ -332,7 +416,7 @@ def shift_dates(ds, offset_days, offset_seconds):
     for elem in ds:
         if elem.VR == 'SQ':
             for item in elem.value or []:
-                shift_dates(item, offset_days, offset_seconds)
+                shift_dates(item, offset_days, offset_seconds, carry)
             continue
         if id(elem) in handled:
             continue
@@ -340,13 +424,13 @@ def shift_dates(ds, offset_days, offset_seconds):
         if not values:
             continue
         if elem.VR == 'DA':
-            shifted = [shift_da(v, offset_days) for v in values]
+            shifted = [shift_da(v, date_offset_days) for v in values]
         elif elem.VR == 'TM':
             shifted = [shift_tm(v, offset_seconds) for v in values]
         elif elem.VR == 'DT':
             shifted = [shift_dt(v, offset_days, offset_seconds) for v in values]
         elif elem.VR in TEXT_VRS:
-            shifted = [shift_text_dates(v, offset_days, offset_seconds)
+            shifted = [shift_text_dates(v, offset_days, offset_seconds, carry)
                        if isinstance(v, str) else v for v in values]
             if shifted == values:
                 continue

@@ -27,6 +27,14 @@ path tested. The remaining work is deployment and the rebuild, not analysis.
   needs the machine holding **both** `~/.dicom-anon-state/<sha1(destination)>/` for
   that delivery **and** `~/dicom-anon-mapping.xlsx`; per the low-ADC notes, neither is
   on the Mac or the Spark. Do not attempt a geometric re-link.
+- **OPEN, and it costs a rebuild — `TOOL_VERSION` moved 0.8 to 0.9 on 2026-09-01.** A
+  bare date (one with no time beside it) was shifted a day out of step with the rest of
+  its own file whenever the offset wrapped past midnight, so the bytes changed and the
+  version had to move with them. **Every patient's folder must be produced again**
+  (~4.6 h for 33), and a run finding 0.8 in a destination will stop and list rather than
+  mix. Weigh that against the artefact: one day on secondary date elements such as
+  `AcquisitionDate` and `ContentDate`, never on the `StudyDate`/`StudyTime` timeline,
+  which is 100% paired. See the decision log before scheduling it.
 - **Still to ask the hospital**: what their export script groups files by. It decides
   what the new failure dialogs mean when they fire.
 - **Noted and not done**: per-file orphan detection (a file deleted from the source
@@ -59,6 +67,13 @@ entry first.
   including across runs**, which is what the downstream longitudinal work needs.
   `PatientAge` is kept and the birth year is the shifted one, since keeping both the
   real year and the age would give the offset away.
+- **"Preserved exactly" means the instant, not the date.** The offset carries a time of
+  day, so a gap measured from `StudyDate` ALONE can differ by a day from the source
+  (13.9% of consecutive gaps, 37.4% of patients). Differencing date **with** time
+  recovers the true interval. Tell anyone doing longitudinal analysis this.
+- **A date with no time beside it takes the file's carry, decided once per file** from
+  `StudyTime`. Without that, dates identical in the source came out a day apart from
+  each other, because a paired `DA`/`TM` carries past midnight and a bare `DA` cannot.
 - **The mapping file opens on a DO NOT EDIT sheet, keeps a `.bak`, and holds the date
   offsets.** Losing it loses the ability to add to the delivery consistently.
 - **The app verifies every file it writes and stops the run on failure**, including the
@@ -88,6 +103,10 @@ Evidence in `docs/decision-log.md`.
   foreign. Read `ds.PatientID` first.
 - **A single malformed file must not halt a run.** A file with no `StudyInstanceUID`
   would have stopped the lot.
+- **A fixture that holds one value constant cannot test a property that depends on it.**
+  Every date test gave every session the same time of day, so sessions carried past
+  midnight together and stayed in step whatever the code did. That hid a real defect for
+  months. Vary the thing the property depends on.
 - **A retry that succeeds destroys the evidence.** v0.11 deliberately shipped without
   the `os.replace` retry because the cause was still unproven. If you ship a retry, keep
   the diagnostic: bind the `OSError` *and use it*, since WinError 32 (sharing violation)

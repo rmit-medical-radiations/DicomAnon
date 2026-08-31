@@ -84,6 +84,8 @@ The offset is a random number of days and seconds, generated per patient and rec
 
 The gap between any two studies for a patient is therefore exactly preserved, while the real dates are not recoverable from the files.
 
+> **Measure that gap from the date *and* the time.** The offset includes a time of day, so a study late in the evening can land on the following day once shifted. Subtracting one `StudyDate` from another can therefore be a day out from the source, while subtracting the full `StudyDate` + `StudyTime` instants is exact. This is unavoidable if times are to be shifted at all, and it affects roughly one consecutive gap in seven.
+
 `PatientBirthDate` is reduced to 1 January of its year, and that year is the shifted one, not the real one. `PatientAge` is kept: age is the gap between the birth date and the study date, and shifting both by the same offset leaves it correct.
 
 > **Why this changed in v0.8.** Earlier versions shifted `StudyDate` alone, by a fixed 30 days written into the source code. `SeriesDate` sat next to it unshifted, so subtracting one from the other recovered the offset; and the 30 days was public anyway. Every time field, and every date field except `StudyDate`, was written out untouched. Data anonymised by an earlier version does not have this protection.

@@ -14,6 +14,7 @@ and add the one-line consequence to `CLAUDE.md`.
 
 ## Contents
 
+- 2026-09-01: a bare date and a paired date parted company at midnight
 - 2026-08-14: v0.11 shipped without the retry on purpose, and what v0.12 had to prove
 - 2026-08-13: the v0.10 crash, diagnosed from the file it left behind
 - 2026-08-13: v0.10 crashed at the hospital, before the cause was known
@@ -180,6 +181,94 @@ v0.3 and earlier still carry hand-uploaded assets. They predate the GitHub
 Actions builds and have not been checked against this bug.
 
 ## Decision log
+
+### 2026-09-01: a bare date and a paired date parted company at midnight
+
+Found by checking the claim the invariants make, rather than by a failure: are the gaps
+between a patient's studies actually preserved? Measured end to end through
+`process_folder`, comparing source against output for **every** `DA`/`TM`/`DT` element at
+one second resolution, sequences and the timestamp embedded in `SeriesDescription`
+included, over two patients, four irregularly spaced sessions and two runs. Every element
+shifted by one constant per patient, every interval survived, the two patients got
+different offsets, and the session added in run 2 kept its true spacing. The claim holds.
+
+**But the measurement was too easy, and the reason is worth recording.** Every existing
+date test gives every session the SAME time of day (`test_dates.py` defaults
+`study_time='134732'` for both studies in its interval check). Two sessions sharing a time
+of day carry past midnight together, so their dates stay in step no matter what the code
+does. The tests were structurally blind to a whole class of fault, the same way
+`verify_file` was blind to defect 9 by reusing the blanking code's own top-level test.
+Vary the thing the property depends on, or the test only proves the fixture is consistent
+with itself.
+
+**The defect, once the times were varied.** `shift_dates` pairs a `DA` with its `TM` and
+shifts them as one instant, which is right and is what keeps a file agreeing with itself
+across the wrap. A `DA` with **no** `TM` beside it has no instant to carry it, and was
+shifted by whole days alone. So the two kinds parted company whenever the time offset
+wrapped:
+
+```
+source  StudyDate = SeriesDate = AcquisitionDate = ContentDate = 20210815
+        StudyTime = SeriesTime = 233000, no AcquisitionTime, no ContentTime
+output  StudyDate       20210508 003000
+        SeriesDate      20210508 003000
+        AcquisitionDate 20210507      <- one day out
+        ContentDate     20210507      <- one day out
+```
+
+Four dates identical in the source, written out as two pairs a day apart. Worse across
+sessions, where there is no time to reconstruct the truth from: a date paired with its
+time in one session and bare in the next lost a day from the interval between them, an
+`AcquisitionDate` gap of 13 days where the source said 14.
+
+**Not hypothetical for this data.** The export analysis measured `AcquisitionDate` on 40%
+of series but `AcquisitionTime` on only 37%, and `ContentTime` on 66%, so a patient having
+one session with the time and one without is ordinary. `StudyDate`/`StudyTime` are 100%
+paired, which is why the primary study timeline was never affected and why this went
+unnoticed.
+
+**The fix: the carry is decided once per file.** `_reference_carry` reads one reference
+time and returns how many days the file's bare dates move on top of `offset_days`.
+`StudyTime` first, because it anchors the study timeline and was on every series in the
+export; failing that the first other `TM` in tag order, then the time inside a `DT`; and 0
+for a file with no time at all, which is the old behaviour and the only defensible answer
+when there is nothing to reason from. Computed at the top level and passed down through
+the recursion, because a sequence item holding a bare date and no time of its own has
+nothing to compute it from. Paired elements are untouched: they still shift as exact
+instants, so this only adds information where there was none.
+
+**What is deliberately NOT fixed, and must not be mistaken for this bug returning.** Two
+studies whose times of day fall either side of the wrap still get different carries, so a
+gap measured from **dates alone** can differ by a day from the source. The instant is
+exact in both, and differencing date with time recovers the true interval. Simulated over
+20000 patients of ~20 sessions with times sampled from clinic hours, 13.9% of consecutive
+gaps differ by a day at date granularity and 37.4% of patients have at least one. This is
+inherent to shifting by a non-integer number of days: the alternatives are giving up the
+time shift, or giving up a file agreeing with itself, and both are worse. **Tell anyone
+doing longitudinal analysis to difference the instant, not the date.**
+`tests/test_intervals.py` asserts the artefact explicitly so it is pinned rather than
+rediscovered.
+
+**`TOOL_VERSION` bumped 0.8 to 0.9, and this one is expensive.** The rule is to bump when
+the bytes change, and they do: any file with a bare date, written when the offset wrapped,
+differs by a day from what this build would now write. Unlike the pydicom move, which was
+measured byte-identical and deliberately left at 0.8, there is no case for leaving it. The
+consequence is that **every patient's folder has to be produced again**, about 4.6 hours
+for 33 patients, and a run that finds an older version in a destination will stop and list
+rather than mix the two. Weigh that against the size of the artefact before rebuilding: it
+is one day on secondary date elements, not on the study timeline.
+
+**Mutation-checked, not trusted for going green.** Eight mutations, each reverting one
+part of the fix: bare dates ignoring the carry (the exact pre-fix behaviour), the free
+text path dropping it, `shift_text_dates` dropping it internally, sequences recomputing
+their own, `StudyTime` no longer preferred, the carry forced to zero, the `DT` fallback
+removed, and `shift_dates` never asking for one. The first version of the test survived
+two of those: the embedded timestamp in the fixture was the 14 digit form, which is a
+whole instant and never reaches the bare-date branch, and every `TM` in the fixture held
+the same value, so preferring `StudyTime` over another `TM` changed nothing. Fixed by
+adding an 8 digit date in `StudyDescription` and an `InstanceCreationTime` (0008,0013)
+that disagrees with `StudyTime` (0008,0030) and sorts before it. All eight now fail the
+test.
 
 ### 2026-08-14: v0.11 shipped without the retry on purpose, and what v0.12 had to prove
 

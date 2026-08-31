@@ -14,6 +14,7 @@ import sys
 
 TESTS = [
     ('test_dates.py', 'defect 1: every date and time shifts, intervals survive'),
+    ('test_intervals.py', 'gaps between studies survive, and a file agrees with itself'),
     ('test_lookup.py', 'the ID lookup file is checked, and rule 1 enforced'),
     ('test_inapp.py', 'defect 6: a foreign study stops the run before it is written'),
     ('test_mapping.py', 'offsets persist, so added studies keep their spacing'),
