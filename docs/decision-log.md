@@ -249,14 +249,34 @@ doing longitudinal analysis to difference the instant, not the date.**
 `tests/test_intervals.py` asserts the artefact explicitly so it is pinned rather than
 rediscovered.
 
-**`TOOL_VERSION` bumped 0.8 to 0.9, and this one is expensive.** The rule is to bump when
-the bytes change, and they do: any file with a bare date, written when the offset wrapped,
-differs by a day from what this build would now write. Unlike the pydicom move, which was
-measured byte-identical and deliberately left at 0.8, there is no case for leaving it. The
-consequence is that **every patient's folder has to be produced again**, about 4.6 hours
-for 33 patients, and a run that finds an older version in a destination will stop and list
-rather than mix the two. Weigh that against the size of the artefact before rebuilding: it
-is one day on secondary date elements, not on the study timeline.
+**`TOOL_VERSION` was bumped to 0.9, then measured, then put back to 0.8.** The bump was
+the reflex and it was wrong. The rule is to bump when the bytes change, and they do
+change, so the reasoning looked sound right up until anyone counted how much.
+
+Counted against the 12465 real source files in `Test-GBM-Sorted-*`:
+
+| field | files | does the output actually differ? |
+|---|---|---|
+| `StudyDate` | 12465 | **No.** It carries a `StudyTime` in 100% of files, so it is paired, goes through `shift_moment`, and was never touched by the fix. |
+| `PatientBirthDate` | 12393 | Only at a year boundary. `_anonymise_birthdate` runs on the next line and flattens it to 1 January of its year, so a one day carry is invisible unless it crosses 31 December. |
+| private `(0029,1043)` | 3420 | No. `shift_dates` is line 33 of `anonymise_dicom` and `remove_private_tags()` is line 37, so it is shifted and then deleted. |
+| `AcquisitionDate` | 16 | Yes. These carry an `AcquisitionTime` element that is present but **empty**, so `shift_moment` returns `None` and the date falls through to the bare path. |
+
+A byte comparison settles it: 900 real files anonymised under both versions with UIDs held
+deterministic and an offset chosen to force the carry on nearly every file left **898 of
+900 byte-identical**.
+
+So the bump would have forced every patient's folder to be produced again, about 4.6 hours
+for 33 patients, to correct two files in nine hundred in fields nothing downstream reads.
+That is exactly the expensive no-op the pydicom entry warns about, and the reason given
+there applies unchanged: a mechanism that fires for no benefit is a mechanism people learn
+to ignore. **Bump it when the bytes change in a way that matters, not merely when they
+change.**
+
+Worth keeping in view: this argument depends on the downstream pipeline reading
+`StudyDate` and not `AcquisitionDate`. That was confirmed for the current work. If
+anything later starts reading the other date elements, the 16 files are real and the
+version question reopens.
 
 **Mutation-checked, not trusted for going green.** Eight mutations, each reverting one
 part of the fix: bare dates ignoring the carry (the exact pre-fix behaviour), the free

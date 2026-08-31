@@ -40,11 +40,17 @@ from pydicom.datadict import tag_for_keyword
 # actually changes: v0.9 moved pydicom from 2.4.3 to 3.0.2 and left this at 0.8, because
 # the two versions were measured to write byte-identical files.
 #
-# 0.9: the per-file date carry. A bare DA, one with no TM beside it, now moves by
-# offset_days plus the file's carry instead of offset_days alone, so files written
-# before this differ by a day in those elements whenever the offset wrapped past
-# midnight. The bytes changed, so this changes with them.
-TOOL_VERSION = '0.9'
+# The per-file date carry was bumped to 0.9 and then put back, which is worth recording
+# so nobody bumps it again for the same reason. It does change the bytes: a bare DA, one
+# with no TM beside it, moves by offset_days plus the file's carry rather than
+# offset_days alone. But measured against 12465 real source files, StudyDate carries a
+# StudyTime in 100% of them, so it is paired, never bare, and never affected. The bare
+# dates that do exist are PatientBirthDate (flattened to 1 January straight afterwards,
+# so only a year boundary shows), a private tag (removed four lines later), and
+# AcquisitionDate in 16 files. A byte comparison with an offset chosen to force the
+# carry left 898 of 900 real files identical. Forcing every patient folder to be
+# produced again for that is the expensive no-op the pydicom entry warns about.
+TOOL_VERSION = '0.8'
 
 STUDY_ID_RE = re.compile(r'STUDY_\d+$')
 
