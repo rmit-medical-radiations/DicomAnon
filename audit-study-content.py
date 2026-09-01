@@ -35,12 +35,22 @@ with its description, and --show-series prints the lot with the rule that fired.
 that before believing any of the ticks. The patterns are at the top of this file and
 are meant to be edited as the data teaches you about it.
 
-Needs pydicom and the standard library only. Runs on an anonymised delivery or on
-source folders; patients are the immediate subdirectories of the path you give it.
+The subject is the DELIVERY, not the source. It is meant to run at the university on
+what actually arrived:
 
-    python3 audit-study-content.py /path/to/export
-    python3 audit-study-content.py /path/to/export --show-series
-    python3 audit-study-content.py /path/to/export --all-files --out audit.json
+    python3 audit-study-content.py /mnt/data/datasets/GBM-SP
+    python3 audit-study-content.py /mnt/data/datasets/GBM-SP --show-series
+    python3 audit-study-content.py /mnt/data/datasets/GBM-SP --all-files --out audit.json
+
+Patients are the immediate subdirectories of the path you give it. It needs pydicom and
+the standard library only, and imports nothing from this repo, so it can be copied to
+the server on its own. Unlike check-anon-output.py it does not import anon_checks, and
+that is deliberate: it asks nothing about anonymisation, so it needs none of that.
+
+It reads what survives anonymisation, and everything it depends on does: Modality,
+SeriesDescription, ContrastBolusAgent and the structure set ROI names are all preserved,
+and the UID remapping is internally consistent, so an RTSTRUCT still resolves to the CT
+it contours. Verified on real DicomAnon output rather than assumed.
 """
 import argparse
 import collections
