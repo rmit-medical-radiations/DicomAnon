@@ -10,12 +10,12 @@ a `v*` tag (`.github/workflows/build-windows.yml`, `build-macos.yml`).
 v0.12 as the current build, shipping the mapping-file swap retry with its recovery
 path tested. The remaining work is deployment and the rebuild, not analysis.
 
-- **OPEN, 2026-09-30: the HN run (`D:/HN Anon Sept 2026`) stopped halfway on v0.12.**
+- **2026-09-30: the HN run (`D:/HN Anon Sept 2026`) stopped halfway on v0.12.**
   A private Elscint tag whose value does not fit its dictionary VR crashed
-  `snapshot_source`. Fixed on master (`convert_wrong_length_to_UN`, no `TOOL_VERSION`
-  bump) but **not yet released**; needs a v0.13 build, which runs into the tag question
-  below. Before re-running, delete the anon folder of the patient in progress at the
-  crash if it has no state file, or the run refuses it as unrecorded. See the log.
+  `snapshot_source`. Fixed (`convert_wrong_length_to_UN`, no `TOOL_VERSION` bump) and
+  **tagged v0.13** on 2026-09-30. Before re-running, delete the anon folder of the
+  patient in progress at the crash if it has no state file, or the run refuses it as
+  unrecorded. See the log.
   From v0.13 a stopped run's report names the patient, file and folder, and a
   `.incomplete` marker lets the refusal say "delete this folder" rather than "start
   again in an empty folder".
@@ -24,10 +24,10 @@ path tested. The remaining work is deployment and the rebuild, not analysis.
   export landing on krypton on 2026-08-27 that passes audit, with 0 of 33 folders
   mixing patients, which is consistent with the rebuild having been completed
   successfully. Confirm that before assuming it; nothing in this repo records it.
-- **OPEN — the release tags do not match the notes.** `origin` carries no tag beyond
-  **v0.9**, while the decision log describes v0.10, v0.11 (cut from `0ba762f`) and
-  v0.12. Since the build workflows fire on a `v*` tag, work out how those releases were
-  published before cutting another one.
+- **Resolved 2026-09-30: the release tags do match the notes.** `origin` has v0.10,
+  v0.11 and v0.12 as annotated tags identical to the local ones, each with a GitHub
+  release. The earlier "nothing beyond v0.9" came from reading the tail of
+  `git ls-remote --tags`, which sorts v0.10 to v0.12 before v0.2. Use `gh release list`.
 - **OPEN, cross-repo — the SRO delivery cannot be re-linked, only re-anonymised.** A
   separate DicomAnon run was made for an SRO export with its own destination, so it got
   its own `uid_map` and none of its UIDs match the image delivery (0 of 280 frame-of-
