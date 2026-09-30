@@ -16,6 +16,9 @@ path tested. The remaining work is deployment and the rebuild, not analysis.
   bump) but **not yet released**; needs a v0.13 build, which runs into the tag question
   below. Before re-running, delete the anon folder of the patient in progress at the
   crash if it has no state file, or the run refuses it as unrecorded. See the log.
+  From v0.13 a stopped run's report names the patient, file and folder, and a
+  `.incomplete` marker lets the refusal say "delete this folder" rather than "start
+  again in an empty folder".
 - **The old export could not be repaired in place and had to be rebuilt from source**
   (18 of 33 folders held data from two different people). Related repos record a clean
   export landing on krypton on 2026-08-27 that passes audit, with 0 of 33 folders

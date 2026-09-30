@@ -221,9 +221,36 @@ Recovery is to delete that one patient's anon folder (the one in the output with
 `<name>.json` under the state directory) and re-run; every completed patient skips.
 If that patient already had state from an earlier run, nothing needs deleting.
 
-**Not done.** The crash report does not name the file or patient being processed, and
-the `unrecorded_folders` wording does not cover a half-written patient from a crashed
-run. Both would have made this quicker to diagnose and recover.
+**Follow-up, same day: a stopped run now says where it stopped.** The v0.12 report
+named neither the patient nor the file, and the next run's refusal blamed "an older
+version" and asked for an empty output folder, which would have thrown away every
+finished patient. Now:
+
+- `self.in_progress` tracks the patient, anon folder and source file. Both the crash
+  report and the verification-failure report append where the run stopped, and whether
+  that patient's folder must be deleted (no state before this run) or will simply be
+  redone (recorded by an earlier run). A failed check mid-patient leaves the same
+  half-written folder as a crash, so it gets the same note.
+- Before writing a new patient's first file, `mark_incomplete` leaves
+  `<anon folder>.incomplete` in the state directory; `clear_incomplete` removes it once
+  the state is saved. `.incomplete` rather than `.json`, so `recorded_owners` and
+  `unrecorded_folders` never read it as state.
+- The refusal splits unrecorded folders by marker. A marked folder gets "an earlier run
+  stopped partway through this patient, delete that folder". An unmarked one gets the
+  three causes in order: lost or moved record (delete nothing), a run stopped by a
+  version with no marker (delete that one patient's folder), data from before state
+  existed (new output folder). The lost-record case goes first because a missing record
+  makes every folder unrecorded, and deleting one then would be wrong.
+
+The state is still saved once per patient. Saving it per file would make a stopped run
+resume without anyone deleting anything, but it rewrites a JSON holding the whole UID
+map after every file, measured at 45,359 files for the largest patient. Not worth it for
+a case that now explains itself.
+
+`tests/test_stopped_midway.py` runs the whole recovery: crash mid-patient, read the
+report, re-run (refused, naming only that folder), delete it, re-run (finishes, the
+finished patient byte-identical). It also covers a marker-less folder, a recorded
+patient (resumes with no deletion), and a failed check.
 
 ### 2026-09-01: a bare date and a paired date parted company at midnight
 

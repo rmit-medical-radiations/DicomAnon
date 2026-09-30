@@ -112,7 +112,10 @@ The record is stored **outside** the output folder, under `.dicom-anon-state` in
 ### When DicomAnon refuses to add to a folder
 Two situations stop a run rather than producing output that cannot be trusted:
 
-* **The output folder contains data DicomAnon has no record of.** This is what you get when pointing a new version at a folder filled by an older one. The UID maps and date offsets used back then cannot be reconstructed, so nothing new can safely be added beside that data. Process the source into a new, empty output folder instead.
+* **The output folder contains data DicomAnon has no record of.** There are three causes, and the fix differs:
+  * The record folder has been moved, lost or restored from a backup, or the output folder has moved (even to a different drive letter). Put them back and delete nothing. See [Keep the mapping spreadsheet and the record folder safe](#keep-the-mapping-spreadsheet-and-the-record-folder-safe).
+  * A run stopped partway through a patient. That patient's folder has some files but no record, because the record is saved once a patient is finished. The report from the stopped run names the patient and the folder. Delete that one folder and run again; every patient that was finished is kept and skipped. When DicomAnon knows this is the cause, it says so and names only that folder.
+  * The folder was filled by an older version, before the record existed. The UID maps and date offsets used back then cannot be reconstructed, so nothing new can safely be added beside that data. Process the source into a new, empty output folder instead.
 * **A patient was last processed by an older version of DicomAnon.** Everything already written for them has to be produced again with the current version, so that one folder never holds two different versions of the anonymisation. If the source no longer has all of that patient's data, DicomAnon lists exactly which files it cannot reproduce.
 
 ## Checks that can stop a run
@@ -136,7 +139,7 @@ A run stops if:
 * a file's `PatientName` or `PatientID` does not match the anonymised folder it is going into;
 * **an output folder would receive files from two different source patients**, or one source patient would be written to two different output folders. This is the check that catches a source patient folder containing somebody else's study, which anonymisation would otherwise relabel and make undetectable.
 
-If a run stops, the files written before that point are still in the output folder, but the output is incomplete and should not be copied anywhere until the cause is fixed.
+If a run stops, the files written before that point are still in the output folder, but the output is incomplete and should not be copied anywhere until the cause is fixed. The report says which patient and file it stopped on, and whether that patient's folder has to be deleted before the next run.
 
 Some findings only warn, because they do not justify discarding a finished run: for example an output folder holding more than one birth year or sex while the source patient ID stayed the same, which points at a data entry problem in the source rather than mixed-up patients.
 

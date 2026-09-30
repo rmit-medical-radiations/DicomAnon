@@ -24,6 +24,7 @@ TESTS = [
     ('test_offsets_survive.py', 'a failed spreadsheet write does not lose the offsets'),
     ('test_recovery.py', 'the recovery the failure dialog asks for actually works'),
     ('test_crash.py', 'a failed run leaves a report, not a dead window'),
+    ('test_stopped_midway.py', 'a stopped run says where, and its recovery works'),
     ('test_readme.py', 'the README lists exactly the tags the code blanks'),
     ('test_messy.py', 'defects 8 and 9: messy real data neither stops nor leaks'),
 ]

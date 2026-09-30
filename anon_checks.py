@@ -808,6 +808,40 @@ def unrecorded_folders(destination_dir, state_dir):
     return unrecorded
 
 
+# A patient's state is saved once, after their last file, so a run that stops partway
+# through a new patient leaves files in the destination and no state for them. Without
+# a trace, unrecorded_folders cannot tell that folder from one written before state
+# existed, and told the operator to start again in an empty folder, throwing away every
+# finished patient (the HN run of 2026-09-29). The marker says which case it is, so the
+# answer can be "delete this one folder" instead.
+def _incomplete_path(state_dir, anon_folder):
+    return os.path.join(state_dir, '{}.incomplete'.format(anon_folder))
+
+
+def mark_incomplete(state_dir, anon_folder, patient_id):
+    """Record that files are about to be written for a patient with no state yet."""
+    os.makedirs(state_dir, exist_ok=True)
+    with open(_incomplete_path(state_dir, anon_folder), 'w') as f:
+        json.dump({'patient_id': patient_id,
+                   'started': datetime.datetime.now().isoformat(timespec='seconds')}, f)
+
+
+def clear_incomplete(state_dir, anon_folder):
+    """Called once the patient's state is saved, which is what makes the folder recorded."""
+    try:
+        os.remove(_incomplete_path(state_dir, anon_folder))
+    except FileNotFoundError:
+        pass
+
+
+def incomplete_folders(state_dir):
+    """Anon folders a stopped run began writing and never recorded."""
+    if not os.path.isdir(state_dir):
+        return set()
+    return {n[:-len('.incomplete')] for n in os.listdir(state_dir)
+            if n.endswith('.incomplete')}
+
+
 def stale_files(state, planned_paths):
     """Recorded files at an older version that this run would not rewrite (defect 4).
 

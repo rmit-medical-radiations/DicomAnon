@@ -13,7 +13,8 @@ from pydicom.dataset import Dataset
 from pydicom.uid import generate_uid
 from pydicom.multival import MultiValue
 from anon_checks import (IDENTIFYING_KEYWORDS, TOOL_VERSION, RunVerifier,
-                         blank_identifying_tags,
+                         blank_identifying_tags, clear_incomplete,
+                         incomplete_folders, mark_incomplete,
                          VerificationError, check_assignments, check_lookup,
                          compare_patient_id,
                          load_patient_state, new_offsets, new_patient_state,
@@ -49,6 +50,9 @@ class DicomAnonWidget(QWidget):
         self.destination_dir = ""
         self.lookup_file = ""
         self.verifier = RunVerifier()
+        # the patient and file being processed, so a report of a stopped run can say
+        # which output folder it left incomplete and what to do about it
+        self.in_progress = None
         self.mapping_file = '{}dicom-anon-mapping.xlsx'.format(expanduser('~') + os.sep)
         # where per-destination state lives; an attribute so tests can redirect it
         self.state_home = expanduser('~')
@@ -538,6 +542,32 @@ class DicomAnonWidget(QWidget):
         msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         msg.exec()
 
+    def _in_progress_note(self):
+        """Where a stopped run left off, and what that means for the next one.
+
+        State is saved once per patient, after their last file, so the patient being
+        processed when a run stops is the one whose output needs attention. The HN run of
+        2026-09-29 crashed without saying which patient that was, and the next run would
+        have refused their folder as unrecorded data from an older version.
+        """
+        work = self.in_progress
+        if not work:
+            return ''
+        if not work['source_file']:
+            return ('It stopped while preparing patient {}, before writing any of their '
+                    'files.'.format(work['patient_id']))
+        where = 'It stopped while anonymising patient {}, at the file:\n{}'.format(
+            work['patient_id'], work['source_file'])
+        if work['recorded']:
+            return ('{}\n\nThat patient was recorded by an earlier run, so nothing '
+                    'needs deleting. The next run redoes the files this one had not '
+                    'finished.'.format(where))
+        return ('{}\n\nThis patient\'s output folder is incomplete, and nothing records '
+                'how its files were anonymised:\n{}\n\nDelete that one folder before '
+                'running again, or the next run will refuse to start. Patients finished '
+                'before it are kept and will be skipped.'.format(
+                    where, os.path.normpath(work['anon_dir'])))
+
     def _report_unexpected_failure(self, error):
         """Turn a crash into a report the operator can forward.
 
@@ -547,10 +577,11 @@ class DicomAnonWidget(QWidget):
         """
         import traceback
         stamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        note = self._in_progress_note()
         body = ('DicomAnon stopped unexpectedly at {}\n\n'
-                'Version: {}\nSource: {}\nOutput: {}\nLookup: {}\n\n{}\n'.format(
+                'Version: {}\nSource: {}\nOutput: {}\nLookup: {}\n\n{}{}\n'.format(
                     stamp, TOOL_VERSION, self.source_dir, self.destination_dir,
-                    self.lookup_file,
+                    self.lookup_file, note + '\n\n' if note else '',
                     ''.join(traceback.format_exception(type(error), error,
                                                        error.__traceback__))))
         saved = self._write_report(body)
@@ -563,11 +594,12 @@ class DicomAnonWidget(QWidget):
             'This is a fault in the application, not something you did wrong.\n\n'
             '{}: {}\n\nThe patients processed before this point were written and '
             'verified normally, but the run is incomplete, so do not treat the output '
-            'folder as finished.{}\n\nThat file is needed to diagnose this, but it can '
+            'folder as finished.{}{}\n\nThat file is needed to diagnose this, but it can '
             'contain patient identifiers, because folder and file names include them. '
             'Send it the way your site requires identifiable data to be sent, not by '
             'ordinary email.'.format(
                 type(error).__name__, error,
+                '\n\n' + note if note else '',
                 '\n\nDetails were saved to:\n{}'.format(saved) if saved else ''))
         msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         msg.exec()
@@ -580,6 +612,10 @@ class DicomAnonWidget(QWidget):
         has to be somewhere they can find and attach.
         """
         stamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # a failed check mid-patient leaves the same half-written folder as a crash
+        note = self._in_progress_note()
+        if note:
+            detail = '{}\n\n{}'.format(detail, note)
         body = 'DicomAnon verification failure at {}\n\n{}\n'.format(stamp, detail)
         saved = self._write_report(body)
         self.status_label.setText('Stopped: verification failed.')
@@ -614,15 +650,46 @@ class DicomAnonWidget(QWidget):
         # and hospital IDs. uid_map and study_label_map used to be created here, empty,
         # once per run and shared by every patient: defects 2 and 3 in one line.
         state_dir = state_dir_for(destination_base_dir, self.state_home)
+        self.in_progress = None
         orphans = unrecorded_folders(destination_base_dir, state_dir)
         if orphans:
-            raise VerificationError(
-                'The output folder already contains anonymised data that this tool has '
-                'no record of, in:\n\n{}\n\nThat data was written by an older version, '
-                'before the current checks existed. Its UID maps and date offsets cannot '
-                'be reconstructed, so new files cannot safely be added beside it.\n\n'
-                'Choose a new, empty output folder and process the source into that.'
-                .format('\n'.join('  - ' + name for name in orphans)))
+            stopped = incomplete_folders(state_dir)
+            halted = [name for name in orphans if name in stopped]
+            unknown = [name for name in orphans if name not in stopped]
+            parts = []
+            if halted:
+                parts.append(
+                    'An earlier run stopped partway through {}, so {} incomplete and '
+                    'nothing records how {} files were anonymised:\n\n{}\n\nDelete {} '
+                    'from the output folder and run again. Every patient that was '
+                    'finished is kept and will be skipped.'.format(
+                        'this patient' if len(halted) == 1 else 'these patients',
+                        'their output folder is' if len(halted) == 1
+                        else 'their output folders are',
+                        'its' if len(halted) == 1 else 'their',
+                        '\n'.join('  - ' + name for name in halted),
+                        'that folder' if len(halted) == 1 else 'those folders'))
+            if unknown:
+                # Without a marker there are three ways to get here: a lost or moved
+                # record, a run stopped by a version that wrote no marker (v0.12 and
+                # earlier), and data from before state tracking. The remedies differ,
+                # and deleting a folder is only right for the second, so it goes after
+                # the check that deletes nothing.
+                parts.append(
+                    'The output folder contains anonymised data that this tool has no '
+                    'record of, in:\n\n{}\n\nCheck these in order.\n\n'
+                    'If DicomAnon\'s record folder (.dicom-anon-state in your home '
+                    'folder) has been moved, lost or restored from a backup, or the '
+                    'output folder has moved, put them back and delete nothing.\n\n'
+                    'If the previous run stopped partway through, the one patient it '
+                    'was working on is left like this. Delete that patient\'s folder '
+                    'and run again; every finished patient is kept.\n\n'
+                    'Otherwise the data was written by an older version, before the '
+                    'current checks existed. Its UID maps and date offsets cannot be '
+                    'reconstructed, so new files cannot safely be added beside it. '
+                    'Choose a new, empty output folder and process the source into '
+                    'that.'.format('\n'.join('  - ' + name for name in unknown)))
+            raise VerificationError('\n\n'.join(parts))
         # seed from previous runs, so a folder filled entirely from the wrong source
         # patient is caught even though nothing conflicts within this run
         for source_id, folder in recorded_owners(state_dir).items():
@@ -695,8 +762,13 @@ class DicomAnonWidget(QWidget):
                 # this patient's own maps, reloaded from the last run. A fresh map would
                 # give the same source UID a new pseudonym (defect 2), and a shared one
                 # would link patients through a UID they have in common (defect 3).
-                state = (load_patient_state(state_dir, anon_patient_folder_name)
+                recorded_state = load_patient_state(state_dir, anon_patient_folder_name)
+                state = (recorded_state
                          or new_patient_state(anon_patient_folder_name, patient_id))
+                self.in_progress = {'patient_id': patient_id,
+                                    'anon_dir': anon_patient_dir,
+                                    'recorded': recorded_state is not None,
+                                    'source_file': None}
                 uid_map = state['uid_map']
                 study_label_map = state['study_label_map']
                 # Reused for a patient already recorded, so studies added later keep
@@ -722,11 +794,14 @@ class DicomAnonWidget(QWidget):
                             '\n'.join('  - ' + p for p in stranded[:10])
                             + ('\n  ... and {} more'.format(len(stranded) - 10)
                                if len(stranded) > 10 else '')))
+                if recorded_state is None:
+                    mark_incomplete(state_dir, anon_patient_folder_name, patient_id)
                 # update the status bar
                 self.status_label.setText('Processing patient ID {}'.format(patient_id))
                 # process GUI events to reflect the update value
                 QApplication.processEvents()
                 for source_file, rel_path in work:
+                    self.in_progress['source_file'] = source_file
                     anon_patient_file = anon_patient_dir + os.sep + rel_path   # add the relative path to the anon directory
                     # Already written by this version, so writing it again would produce
                     # the same bytes. Skipping matters at the scale this runs at: without
@@ -845,11 +920,15 @@ class DicomAnonWidget(QWidget):
                 state['tool_version'] = TOOL_VERSION
                 state['offsets'] = list(offsets)
                 save_patient_state(state_dir, anon_patient_folder_name, state)
+                clear_incomplete(state_dir, anon_patient_folder_name)
+                self.in_progress = None
                 self._save_mapping(mapping_df, self.mapping_file)
 
         return mapping_df, not_found_patients, no_files_patients
 
     def anon_button_clicked(self):
+        # a note left by an earlier stopped run must not be attached to this one's reports
+        self.in_progress = None
         # get the file names under the directory selected
         if self.source_dir == "":
             self._display_error("Please select a source folder.")
