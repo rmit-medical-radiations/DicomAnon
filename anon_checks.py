@@ -29,7 +29,23 @@ import os
 import re
 import secrets
 
+import pydicom.config
 from pydicom.datadict import tag_for_keyword
+
+# A value whose length does not fit its VR is kept as raw bytes under VR UN, with a
+# warning, instead of raising. pydicom converts values lazily, so a bad one does not
+# fail dcmread: it fails the first full walk of the dataset, which is snapshot_source,
+# and that stopped a whole run about halfway through at the hospital (2026-09-29). The
+# element was the Elscint private tag (01F1,1026): pydicom's private dictionary says
+# FD, an 8-byte double, and the scanner had written the text '0.773 '.
+#
+# Only binary VRs have a length to get wrong, and no identifying element is binary, so
+# nothing the checks look at is hidden by this. A private element is then removed as
+# usual. Files that already processed had no such element, or they would have raised,
+# so their output is unchanged and TOOL_VERSION stays where it is.
+#
+# Set here because both the app and check-anon-output.py import this module.
+pydicom.config.convert_wrong_length_to_UN = True
 
 # Bumped whenever a change alters what the anonymiser WRITES. A patient whose folder was
 # written by an older version cannot have new files added beside the old ones (defect 4),

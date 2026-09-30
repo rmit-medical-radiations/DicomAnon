@@ -4,12 +4,18 @@ A PyQt6 desktop app that anonymises DICOM studies and writes an ID mapping file.
 Released as a Windows EXE and a macOS app bundle, both built by GitHub Actions on
 a `v*` tag (`.github/workflows/build-windows.yml`, `build-macos.yml`).
 
-## Current status / next steps (as of 2026-09-01)
+## Current status / next steps (as of 2026-09-30)
 
 **All nine defects found in the 2026-08 analysis are addressed.** The notes record
 v0.12 as the current build, shipping the mapping-file swap retry with its recovery
 path tested. The remaining work is deployment and the rebuild, not analysis.
 
+- **OPEN, 2026-09-30: the HN run (`D:/HN Anon Sept 2026`) stopped halfway on v0.12.**
+  A private Elscint tag whose value does not fit its dictionary VR crashed
+  `snapshot_source`. Fixed on master (`convert_wrong_length_to_UN`, no `TOOL_VERSION`
+  bump) but **not yet released**; needs a v0.13 build, which runs into the tag question
+  below. Before re-running, delete the anon folder of the patient in progress at the
+  crash if it has no state file, or the run refuses it as unrecorded. See the log.
 - **The old export could not be repaired in place and had to be rebuilt from source**
   (18 of 33 folders held data from two different people). Related repos record a clean
   export landing on krypton on 2026-08-27 that passes audit, with 0 of 33 folders
@@ -94,7 +100,9 @@ Evidence in `docs/decision-log.md`.
   study sitting under it, and the same operation destroys the evidence that it was ever
   foreign. Read `ds.PatientID` first.
 - **A single malformed file must not halt a run.** A file with no `StudyInstanceUID`
-  would have stopped the lot.
+  would have stopped the lot. So did a private tag whose bytes did not fit pydicom's
+  dictionary VR, and `dcmread` succeeding proves nothing: pydicom parses values lazily,
+  so a bad one only raises on first access. Test messy data through a saved file.
 - **A fixture that holds one value constant cannot test a property that depends on it.**
   Every date test gave every session the same time of day, so sessions carried past
   midnight together and stayed in step whatever the code did. That hid a real defect for

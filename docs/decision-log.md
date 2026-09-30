@@ -14,6 +14,7 @@ and add the one-line consequence to `CLAUDE.md`.
 
 ## Contents
 
+- 2026-09-30: a private tag with the wrong VR stopped the HN run halfway
 - 2026-09-01: a bare date and a paired date parted company at midnight
 - 2026-08-14: v0.11 shipped without the retry on purpose, and what v0.12 had to prove
 - 2026-08-13: the v0.10 crash, diagnosed from the file it left behind
@@ -181,6 +182,48 @@ v0.3 and earlier still carry hand-uploaded assets. They predate the GitHub
 Actions builds and have not been checked against this bug.
 
 ## Decision log
+
+### 2026-09-30: a private tag with the wrong VR stopped the HN run halfway
+
+The v0.12 run of 2026-09-29 (source `.../DICOM export temp/HN/Sorted`, output
+`D:/HN Anon Sept 2026`) stopped about 50% through with a `BytesLengthException` from
+`snapshot_source`. The report the crash dialog saved was enough to diagnose it; the
+traceback line numbers (DicomAnon.py 755 and 902, anon_checks.py 380) match the v0.12
+tag exactly.
+
+**Cause.** Private element `(01F1,1026)`, Elscint. pydicom 3.0.2's private dictionary
+gives it VR `FD`, an 8-byte double, and replaces the file's explicit `UN` with that.
+The scanner had written the text `'0.773 '`, six bytes, which no number of doubles
+fits. pydicom converts values lazily, so `dcmread` succeeded and the per-file
+`try/except` around it caught nothing. The first full walk of the dataset, which is
+`snapshot_source`'s `iterall()`, raised, and nothing between there and
+`anon_button_clicked` catches it, so the whole run stopped rather than one file.
+Reproduced on a synthetic file with the same tag and bytes.
+
+**Fix.** `pydicom.config.convert_wrong_length_to_UN = True`, set in `anon_checks.py`
+so the app and `check-anon-output.py` both get it. A value that does not fit its VR is
+kept as raw bytes under `UN` with a warning. The private element is then removed as
+every private element is. Only binary VRs have a length to get wrong and no
+identifying element is binary, so nothing the checks look at is hidden. A public
+binary element with a bad length (the test uses `Rows` one byte short) passes through
+as `UN` rather than stopping the run.
+
+**TOOL_VERSION stays at 0.8.** Every file already written had no such element, or it
+would have raised, so the flag changes the output of none of them. Counted, not
+assumed, per the 2026-09-01 entry: the flag only acts on the exception path.
+
+**What the crashed run left behind.** State and the mapping row are saved once per
+patient, after its last file. The patient being processed at the crash had files
+written but no state file, so a re-run into the same output refuses with
+`unrecorded_folders`, whose message blames "an older version". That is wrong for this
+case but the refusal is right: those files' UIDs and offsets were recorded nowhere.
+Recovery is to delete that one patient's anon folder (the one in the output with no
+`<name>.json` under the state directory) and re-run; every completed patient skips.
+If that patient already had state from an earlier run, nothing needs deleting.
+
+**Not done.** The crash report does not name the file or patient being processed, and
+the `unrecorded_folders` wording does not cover a half-written patient from a crashed
+run. Both would have made this quicker to diagnose and recover.
 
 ### 2026-09-01: a bare date and a paired date parted company at midnight
 

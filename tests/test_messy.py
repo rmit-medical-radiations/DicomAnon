@@ -74,6 +74,33 @@ def multivalue_uid():
     return ds
 check('empty sequence', multivalue_uid)
 
+# The hospital run of 2026-09-29 stopped halfway on this. pydicom's private dictionary
+# gives Elscint (01F1,1026) VR FD, an 8-byte double, and the scanner wrote the text
+# '0.773 '. It has to go through a real file: pydicom only converts a value when the
+# element is first read, so a dataset built in memory never meets the problem.
+def wrong_length_private():
+    import tempfile as _tf
+    from pydicom import dcmread
+    ds = base()
+    ds.file_meta = FileMetaDataset()
+    ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    ds.file_meta.MediaStorageSOPClassUID = ds.SOPClassUID
+    ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+    ds.add_new(0x01F10010, 'LO', 'ELSCINT1')
+    ds.add_new(0x01F11026, 'UN', b'0.773 ')
+    ds.Rows = 512
+    path = os.path.join(_tf.mkdtemp(), 'elscint.dcm')
+    ds.save_as(path, enforce_file_format=True)
+    # and a public binary element one byte short, which has no dictionary to blame
+    with open(path, 'rb') as f:
+        raw = f.read()
+    rows = b'\x28\x00\x10\x00US\x02\x00\x00\x02'
+    assert raw.count(rows) == 1
+    with open(path, 'wb') as f:
+        f.write(raw.replace(rows, b'\x28\x00\x10\x00US\x01\x00\x00'))
+    return dcmread(path)
+check('value whose length does not fit its VR', wrong_length_private)
+
 # Nested identifying tags must actually be gone, not merely undetected: the old check
 # used the same top-level test as the blanking, so it could only confirm its own bug.
 def nested_check():
